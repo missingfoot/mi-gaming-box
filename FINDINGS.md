@@ -108,7 +108,7 @@ field names suggest byte8=R. Verify by eye.
 
 ## Still to confirm
 - LEDZ values for the rear light bars, and whether colours need an R/B swap (use the GUI's Advanced → Zone probe).
-- Meaning of ARPL, ATFN and KBIT.
+- Meaning of ARPL, ATFN and KBIT (KBIT: writing various values had no visible effect on the backlight).
 
 ## Macro keys (the 5 extra keys)
 They don't send normal key codes, and the Windows app's `KeyboardMonitor.dll` hook only

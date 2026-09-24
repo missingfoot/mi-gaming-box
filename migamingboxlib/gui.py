@@ -13,6 +13,7 @@ import traceback
 
 from PySide6.QtCore import QObject, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QColorDialog, QComboBox, QFormLayout, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
@@ -220,17 +221,7 @@ class SystemTab(QWidget):
         kl = QFormLayout(kb)
         self.kbbl = QCheckBox("Backlight on")
         self.kbbl.clicked.connect(self._set_kb)
-        self.kbit = QSpinBox()
-        self.kbit.setRange(0, 0xFFFF)
-        self.kbit.setToolTip("EC register KBIT (16-bit), written together with the backlight "
-                             "switch. Purpose unknown, possibly an idle timeout.")
-        apply = QPushButton("Apply KBIT")
-        apply.clicked.connect(self._apply_kbit)
-        kbit_row = QHBoxLayout()
-        kbit_row.addWidget(self.kbit)
-        kbit_row.addWidget(apply)
         kl.addRow(self.kbbl)
-        kl.addRow("KBIT (advanced)", kbit_row)
         lay.addWidget(kb)
         lay.addStretch()
 
@@ -240,10 +231,6 @@ class SystemTab(QWidget):
     def _set_kb(self, on):
         self.win.dev.run(lambda w: w.set_kbd_backlight(on), lambda r: self.refresh())
 
-    def _apply_kbit(self):
-        on, kbit = self.kbbl.isChecked(), self.kbit.value()
-        self.win.dev.run(lambda w: w.set_kbd_backlight(on, kbit), lambda r: self.refresh())
-
     def refresh(self):
         def read(w):
             return {k: w.get_switch(k) for k in self.LABELS}, w.get_kbd_backlight()
@@ -252,9 +239,7 @@ class SystemTab(QWidget):
             sw, kb = res
             for k, r in sw.items():
                 self.checks[k].setChecked(status_ok(r) and bool(r.value))
-            on, kbit = kb
-            self.kbbl.setChecked(on)
-            self.kbit.setValue(kbit)
+            self.kbbl.setChecked(kb[0])
         self.win.dev.run(read, done)
 
 
@@ -638,12 +623,41 @@ class MainWindow(QMainWindow):
         QApplication.quit()
 
 
+def already_running(name):
+    """Ask a running instance to show itself. True if one answered."""
+    sock = QLocalSocket()
+    sock.connectToServer(name)
+    if not sock.waitForConnected(300):
+        return False
+    sock.write(b"show")
+    sock.waitForBytesWritten(300)
+    sock.disconnectFromServer()
+    return True
+
+
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setDesktopFileName("migamingbox")
     app.setQuitOnLastWindowClosed(False)
-    win = MainWindow(demo="--demo" in sys.argv)
+
+    # One instance only: two GUIs would each start a helper and fight over the EC.
+    demo = "--demo" in sys.argv
+    name = f"migamingbox-{os.getuid()}" + ("-demo" if demo else "")
+    if already_running(name):
+        return
+    QLocalServer.removeServer(name)  # clear a stale socket from a crashed instance
+    server = QLocalServer()
+    server.listen(name)
+
+    win = MainWindow(demo=demo)
+
+    def on_connection():
+        conn = server.nextPendingConnection()
+        conn.readyRead.connect(lambda: (conn.readAll(), win.showNormal(), win.raise_(),
+                                        win.activateWindow()))
+    server.newConnection.connect(on_connection)
+
     if "--tray" not in sys.argv:
         win.show()
     sys.exit(app.exec())

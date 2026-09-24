@@ -9,6 +9,7 @@ and the acpi_call module (Arch/AUR: acpi_call-dkms).
     sudo miwmi turbo on|off
     sudo miwmi fnlock|winlock|touchpad|powerled on|off
     sudo miwmi kbdlight on|off
+    sudo miwmi ec [FIELD ...]      # read EC fields, default: the lighting registers
     sudo miwmi raw FA00 0102 [arg0 arg1 ...]
     migamingbox-helper             # JSON-lines root helper used by the GUI (via pkexec)
 """
@@ -188,6 +189,13 @@ class AcpiCallWmi(MiWmi):
             raise RuntimeError(f"unexpected ACPI reply: {out!r}")
         return bytes(int(x, 16) for x in out.strip("{}").split(",") if x.strip())
 
+    def read_ec(self, name):
+        """Read a named EC field from the DSDT (e.g. LETY) - read-only diagnostics."""
+        if not name.isalnum() or len(name) > 4:
+            raise ValueError(f"bad EC field name {name!r}")
+        with self._locked():
+            return self._acpi(rf"\_SB.PCI0.LPCB.EC0.{name.upper()}")
+
     def read_event(self):
         """Current MIAP event buffer (EVBF) via _WED: returns (EVT0, EVT1, EVT2)."""
         with self._locked():
@@ -307,6 +315,11 @@ def main(argv):
     elif op == "turbo":
         r = dev.set_turbo(argv[2] == "on")
         print(f"status={r.status:#06x}")
+    elif op == "ec":
+        names = argv[2:] or ["LEDZ", "LETY", "LSPD", "LEBR", "LCAM", "KBBR", "KBBL", "KBIT",
+                             "C0ZR", "C0ZG", "C0ZB", "C1ZR", "C1ZG", "C1ZB"]
+        for n in names:
+            print(f"{n:5s} {dev.read_ec(n)}")
     elif op == "kbdlight":
         r = dev.set_kbd_backlight(argv[2] == "on")
         print(f"status={r.status:#06x}")
