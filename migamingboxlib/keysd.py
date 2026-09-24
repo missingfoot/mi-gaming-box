@@ -86,13 +86,7 @@ def read_events(sock):
             off += (ln + 3) & ~3
 
 
-# --- event decoding ---------------------------------------------------------
-
-def read_miap_event(acpi):
-    out = acpi._acpi(rf"{miwmi.DEV}._WED 0x80")
-    raw = bytes(int(x, 16) for x in out.strip("{}").split(",") if x.strip())
-    return struct.unpack_from("<HHH", raw)  # EVT0, EVT1, EVT2
-
+# --- key mapping ------------------------------------------------------------
 
 def load_map():
     mapping = dict(DEFAULT_MAP)
@@ -130,7 +124,7 @@ def main():
         if typ != 0x80 or not (cls.startswith("wmi") or "PNP0C14" in bus):
             continue
         try:
-            evt0, evt1, evt2 = read_miap_event(acpi)
+            evt0, evt1, evt2 = acpi.read_event()
         except Exception as e:
             print(f"_WED failed: {e}", file=sys.stderr, flush=True)
             continue

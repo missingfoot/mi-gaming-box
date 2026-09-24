@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+post_upgrade() {
+    # Pick up new code in the running macro-key daemon (no-op if it isn't running).
+    systemctl try-restart mikeysd.service 2>/dev/null || true
+}

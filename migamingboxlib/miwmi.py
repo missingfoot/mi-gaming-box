@@ -11,6 +11,8 @@ and the acpi_call module (Arch/AUR: acpi_call-dkms).
     sudo miwmi raw FA00 0102 [arg0 arg1 ...]
     migamingbox-helper             # JSON-lines root helper used by the GUI (via pkexec)
 """
+import contextlib
+import fcntl
 import json
 import os
 import struct
@@ -20,6 +22,10 @@ import threading
 
 ACPI_CALL = "/proc/acpi/call"
 INSTALLED_HELPER = "/usr/lib/mi-gaming-box/migamingbox-helper"
+# acpi_call keeps one global result that is cleared when read, and a WSAA can itself
+# fire MIAP events that mikeysd answers with _WED. Every process holds this lock for a
+# whole write+read sequence so they never steal each other's replies.
+LOCK_PATH = "/run/mi-gaming-box.lock"
 # Only verified on this model. Other firmware may treat the same EC writes differently,
 # so refuse elsewhere unless MI_GAMING_BOX_FORCE=1 is set or /etc/mi-gaming-box/force
 # exists (the file works for the GUI too, whose pkexec helper gets a clean environment).
@@ -147,6 +153,16 @@ class AcpiCallWmi(MiWmi):
             raise RuntimeError("acpi_call not available (install acpi_call-dkms)")
 
     @staticmethod
+    @contextlib.contextmanager
+    def _locked():
+        fd = os.open(LOCK_PATH, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+
+    @staticmethod
     def _acpi(expr):
         with open(ACPI_CALL, "w") as f:
             f.write(expr)
@@ -157,11 +173,21 @@ class AcpiCallWmi(MiWmi):
         return out
 
     def _xfer(self, buf):
-        self._acpi(f"{DEV}.WSAA 0 b{buf.hex()}")
-        out = self._acpi(f"{DEV}.WQAA 0")
+        with self._locked():
+            self._acpi(f"{DEV}.WSAA 0 b{buf.hex()}")
+            out = self._acpi(f"{DEV}.WQAA 0")
         if not out.startswith("{"):
             raise RuntimeError(f"unexpected ACPI reply: {out!r}")
         return bytes(int(x, 16) for x in out.strip("{}").split(",") if x.strip())
+
+    def read_event(self):
+        """Current MIAP event buffer (EVBF) via _WED: returns (EVT0, EVT1, EVT2)."""
+        with self._locked():
+            out = self._acpi(f"{DEV}._WED 0x80")
+        if not out.startswith("{"):
+            raise RuntimeError(f"unexpected ACPI reply: {out!r}")
+        raw = bytes(int(x, 16) for x in out.strip("{}").split(",") if x.strip())
+        return struct.unpack_from("<HHH", raw)
 
 
 def helper_argv():
