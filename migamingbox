@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+"""Mi Gaming Box control panel (GUI).
+
+Thin launcher: the code lives in migamingboxlib/ next to this script (dev
+checkout) or in /usr/lib/mi-gaming-box/ (installed package, see PKGBUILD)."""
+
+import sys
+from pathlib import Path
+
+_here = Path(__file__).resolve().parent
+for _candidate in (_here, Path("/usr/lib/mi-gaming-box")):
+    if (_candidate / "migamingboxlib" / "__init__.py").exists():
+        sys.path.insert(0, str(_candidate))
+        break
+else:
+    raise ImportError("Could not locate the migamingboxlib package (looked in "
+                      f"{_here} and /usr/lib/mi-gaming-box)")
+
+from migamingboxlib.gui import main
+
+if __name__ == "__main__":
+    main()

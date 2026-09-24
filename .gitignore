@@ -1,0 +1,11 @@
+*.pkg.tar.zst
+pkg/
+src/
+__pycache__/
+
+# Never publish: Xiaomi's proprietary installer, and the ACPI dumps
+# (acpi/msdm.dat holds this machine's Windows product key).
+游戏盒子/
+游戏盒子.zip
+acpi/
+*.bmof

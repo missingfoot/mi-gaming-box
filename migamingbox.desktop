@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Mi Gaming Box
+Comment=Turbo fan, lighting and keyboard controls for the Xiaomi Mi Gaming Laptop
+Exec=/usr/bin/migamingbox
+Icon=migamingbox
+Terminal=false
+Categories=Settings;HardwareSettings;

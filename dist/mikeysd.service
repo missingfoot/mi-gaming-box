@@ -1,0 +1,12 @@
+[Unit]
+Description=Xiaomi Mi Gaming Laptop macro keys
+After=systemd-modules-load.service
+
+[Service]
+ExecStartPre=-/usr/bin/modprobe acpi_call
+ExecStart=/usr/bin/mikeysd
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
