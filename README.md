@@ -19,6 +19,7 @@ interface was worked out is documented in [FINDINGS.md](FINDINGS.md).
 | CPU / GPU temperature, both fan speeds | ✅ tested |
 | 5 macro keys → F13–F17, bindable in your desktop's shortcut settings | ✅ tested |
 | Fn lock, Windows key, touchpad, power-button LED | ✅ reading tested, switching expected to work |
+| Keyboard backlight on/off | ✅ tested |
 | Keyboard RGB (4 areas; Static / Breath / Wave / Colorful) | 🧪 implemented, needs testers |
 | Rear light bars (left / right, colour cycle) | 🧪 implemented, needs testers |
 
@@ -78,7 +79,7 @@ The Debian/Ubuntu and Fedora package names are best-effort and untested. Correct
   `/etc/mi-gaming-box/keys.conf` (evdev key names, e.g. `3 = KEY_F20`), then run
   `sudo systemctl restart mikeysd`. `sudo mikeysd --probe` shows raw key events.
 - **CLI**: `sudo miwmi status`, `sudo miwmi turbo on|off`,
-  `sudo miwmi fnlock|winlock|touchpad|powerled on|off`, and
+  `sudo miwmi fnlock|winlock|touchpad|powerled|kbdlight on|off`, and
   `sudo miwmi raw FA00 0102` for any raw command.
 
 ## Help wanted

@@ -8,6 +8,7 @@ and the acpi_call module (Arch/AUR: acpi_call-dkms).
     sudo miwmi status
     sudo miwmi turbo on|off
     sudo miwmi fnlock|winlock|touchpad|powerled on|off
+    sudo miwmi kbdlight on|off
     sudo miwmi raw FA00 0102 [arg0 arg1 ...]
     migamingbox-helper             # JSON-lines root helper used by the GUI (via pkexec)
 """
@@ -81,11 +82,18 @@ class MiWmi:
         return self.transact(WRITE, F_FAN, int(bool(on)))
 
     def get_kbd_backlight(self):
-        """value = on/off (KBBL), words[0] = KBIT (16-bit, probably idle timeout)."""
-        return self.transact(READ, F_KBD_BACKLIGHT)
+        """Returns (on, kbit). The EC bit KBBL is inverted: 1 means backlight OFF.
+        KBIT is a 16-bit EC value of unknown purpose (maybe an idle timeout)."""
+        r = self.transact(READ, F_KBD_BACKLIGHT)
+        if not r.ok:
+            raise RuntimeError(f"keyboard backlight read failed (status {r.status:#06x})")
+        return r.value == 0, r.words[0] & 0xFFFF
 
-    def set_kbd_backlight(self, on, kbit):
-        return self.transact(WRITE, F_KBD_BACKLIGHT, int(bool(on)), kbit & 0xFFFF)
+    def set_kbd_backlight(self, on, kbit=None):
+        """kbit=None keeps the current KBIT value (the firmware writes both at once)."""
+        if kbit is None:
+            kbit = self.get_kbd_backlight()[1]
+        return self.transact(WRITE, F_KBD_BACKLIGHT, int(not on), kbit & 0xFFFF)
 
     # --- lighting -------------------------------------------------------
     # FB00 0100: arg0 -> LEDZ, arg1 bytes -> LETY (effect), LSPD (speed), LEBR (brightness)
@@ -239,7 +247,7 @@ class MockWmi(MiWmi):
     def __init__(self):
         self.state = {(F_MISC, k): 0 for k in MISC.values()}
         self.state[(F_FAN, 0)] = 0
-        self.state[(F_KBD_BACKLIGHT, 0)] = 1
+        self.state[(F_KBD_BACKLIGHT, 0)] = 0  # KBBL 0 = backlight on
 
     def _xfer(self, buf):
         cmd, func, a0, a1 = struct.unpack_from("<HHII", buf)
@@ -294,8 +302,13 @@ def main(argv):
             print(f"{name:9s} status={r.status:#06x} value={r.value}")
         r = dev.get_fan()
         print(f"fan       status={r.status:#06x} turbo={r.value} data={r.words}")
+        on, kbit = dev.get_kbd_backlight()
+        print(f"kbdlight  on={int(on)} kbit={kbit}")
     elif op == "turbo":
         r = dev.set_turbo(argv[2] == "on")
+        print(f"status={r.status:#06x}")
+    elif op == "kbdlight":
+        r = dev.set_kbd_backlight(argv[2] == "on")
         print(f"status={r.status:#06x}")
     elif op in MISC:
         r = dev.set_switch(op, argv[2] == "on")

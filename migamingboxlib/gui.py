@@ -216,24 +216,31 @@ class SystemTab(QWidget):
         bl.addWidget(note)
         lay.addWidget(box)
 
-        kb = QGroupBox("Keyboard backlight (experimental, unused by Windows app)")
+        kb = QGroupBox("Keyboard backlight")
         kl = QFormLayout(kb)
         self.kbbl = QCheckBox("Backlight on")
+        self.kbbl.clicked.connect(self._set_kb)
         self.kbit = QSpinBox()
         self.kbit.setRange(0, 0xFFFF)
-        self.kbit.setToolTip("EC register KBIT (16-bit). Probably the idle timeout.")
-        apply = QPushButton("Apply")
-        apply.clicked.connect(self._apply_kb)
+        self.kbit.setToolTip("EC register KBIT (16-bit), written together with the backlight "
+                             "switch. Purpose unknown, possibly an idle timeout.")
+        apply = QPushButton("Apply KBIT")
+        apply.clicked.connect(self._apply_kbit)
+        kbit_row = QHBoxLayout()
+        kbit_row.addWidget(self.kbit)
+        kbit_row.addWidget(apply)
         kl.addRow(self.kbbl)
-        kl.addRow("KBIT value", self.kbit)
-        kl.addRow(apply)
+        kl.addRow("KBIT (advanced)", kbit_row)
         lay.addWidget(kb)
         lay.addStretch()
 
     def _set(self, key, on):
         self.win.dev.run(lambda w: w.set_switch(key, on), lambda r: self.refresh())
 
-    def _apply_kb(self):
+    def _set_kb(self, on):
+        self.win.dev.run(lambda w: w.set_kbd_backlight(on), lambda r: self.refresh())
+
+    def _apply_kbit(self):
         on, kbit = self.kbbl.isChecked(), self.kbit.value()
         self.win.dev.run(lambda w: w.set_kbd_backlight(on, kbit), lambda r: self.refresh())
 
@@ -245,9 +252,9 @@ class SystemTab(QWidget):
             sw, kb = res
             for k, r in sw.items():
                 self.checks[k].setChecked(status_ok(r) and bool(r.value))
-            if status_ok(kb):
-                self.kbbl.setChecked(bool(kb.value))
-                self.kbit.setValue(kb.words[0] & 0xFFFF)
+            on, kbit = kb
+            self.kbbl.setChecked(on)
+            self.kbit.setValue(kbit)
         self.win.dev.run(read, done)
 
 

@@ -96,7 +96,7 @@ Turbo on/off and all reads were tested on 2026-09-25 and returned status 0.
 | 0x0101 | – | byte4 = slot 1-8 → C0..C7, byte5→LCAM (colour count), bytes 8/9/10 → C?ZR/G/B |
 | 0x0102 | u16@2=FANM, u32@4=fan1 rpm, @8=fan2 rpm, @12=CPU °C, @16=GPU °C | arg0 0/1 → FANM (turbo) |
 | 0x0300 | arg0 selects: 0 TPON, 1 FNKY, 2 WINK, 3 ARPL(?), 4 PWLE; value in u16@2 | same arg0, arg1 = 0/1 |
-| 0x0400 | u16@2=KBBL (kbd backlight on), u32@4=KBIT (16-bit) | arg0→KBBL (0/1), arg1→KBIT |
+| 0x0400 | u16@2=KBBL (**inverted: 1 = keyboard backlight off**, verified), u32@4=KBIT (16-bit) | arg0→KBBL (0/1), arg1→KBIT |
 | 0x0500 | u16@2=ATFN (16-bit, unknown) | arg0 0/1 → ATFN |
 
 The EC fields live in `EMEM` (SystemMemory 0xFE708000). The lighting block starts at +0xB00.
