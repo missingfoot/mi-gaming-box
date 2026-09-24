@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 James Sparkes
 """Control library/CLI for the Xiaomi Mi Gaming Laptop (TM1801) RW_TMAWMI interface.
 
 Protocol recovered from GamingBox.exe; see FINDINGS.md. Hardware access needs root
@@ -18,6 +20,10 @@ import threading
 
 ACPI_CALL = "/proc/acpi/call"
 INSTALLED_HELPER = "/usr/lib/mi-gaming-box/migamingbox-helper"
+# Only verified on this model. Other firmware may treat the same EC writes differently,
+# so refuse elsewhere unless MI_GAMING_BOX_FORCE=1 is set or /etc/mi-gaming-box/force
+# exists (the file works for the GUI too, whose pkexec helper gets a clean environment).
+SUPPORTED_PRODUCTS = {"TM1801"}
 DEV = r"\_SB.MIAP"
 
 READ, WRITE = 0xFA00, 0xFB00
@@ -115,10 +121,26 @@ class MiWmi:
         return self.write_effect(ZONE_KEYBOARD[0], effect, speed, brightness)
 
 
+def check_hardware():
+    try:
+        with open("/sys/class/dmi/id/product_name") as f:
+            product = f.read().strip()
+    except OSError:
+        product = "unknown"
+    forced = (os.environ.get("MI_GAMING_BOX_FORCE") == "1"
+              or os.path.exists("/etc/mi-gaming-box/force"))
+    if product not in SUPPORTED_PRODUCTS and not forced:
+        raise RuntimeError(
+            f"unsupported machine (product_name={product!r}); this tool only supports "
+            f"{', '.join(sorted(SUPPORTED_PRODUCTS))}. To override at your own risk, set "
+            "MI_GAMING_BOX_FORCE=1 or create /etc/mi-gaming-box/force.")
+
+
 class AcpiCallWmi(MiWmi):
     """Direct access via /proc/acpi/call (must run as root)."""
 
     def __init__(self):
+        check_hardware()
         if not os.path.exists(ACPI_CALL):
             subprocess.run(["modprobe", "acpi_call"], check=False)
         if not os.path.exists(ACPI_CALL):

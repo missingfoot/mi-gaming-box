@@ -1,0 +1,26 @@
+Mi Gaming Box for Linux
+Copyright (C) 2026 James Sparkes
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; either version 2 of the License, or (at your option) any later
+version. See LICENSE for the full text.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. It writes to the laptop's embedded controller; use it at
+your own risk.
+
+Independent interoperability project
+------------------------------------
+This project is not affiliated with, endorsed by, or supported by Xiaomi,
+TIMI, or Quanta Computer. "Xiaomi", "Mi" and related names are trademarks of
+their respective owners and are used here only to identify the hardware this
+software works with.
+
+No Xiaomi code, binaries, firmware or other copyrighted material is included
+in this repository. The firmware interface this software uses was worked out
+by studying the behaviour of Xiaomi's Windows "GamingBox" utility and the
+laptop's ACPI tables on hardware the author owns, solely to make that hardware
+work under Linux. All code here is original. FINDINGS.md documents the
+interface as facts (command numbers, register names, event codes).

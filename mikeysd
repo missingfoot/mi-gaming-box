@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 James Sparkes
 """mikeysd: macro-key daemon (run as root, normally via mikeysd.service).
 
 Thin launcher: the code lives in migamingboxlib/ next to this script (dev

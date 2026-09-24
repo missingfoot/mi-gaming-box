@@ -1,6 +1,6 @@
 # Xiaomi Mi Gaming Laptop (TIMI TM1801) – GamingBox reverse-engineering notes
 
-Source: `游戏盒子.zip` → `GamingBox_Setup_1.2.3.1_20180706` (the actual control app) and
+Source: Xiaomi's driver bundle (not included in this repo) → `GamingBox_Setup_1.2.3.1_20180706` (the actual control app) and
 `MiService2_Setup_3.0.0.48` (just an updater/telemetry service — no hardware access).
 The app runs as a 32-bit binary, `GamingBox.exe`. All hardware control lives in it,
 in C++ classes `base::wmi::syncoperation::*`.
@@ -10,7 +10,7 @@ in C++ classes `base::wmi::syncoperation::*`.
 | Thing | Value |
 |---|---|
 | WMI class | `root\wmi : RW_TMAWMI` (property `BufferBytes`, `uint8[32]`) |
-| GUID (live on this machine) | `E2A89D40-784F-4E91-BE22-AE373CDEA97A`, object id `AA`, setable |
+| GUID (on a TM1801) | `E2A89D40-784F-4E91-BE22-AE373CDEA97A`, object id `AA`, setable |
 | ACPI device | `\_SB.MIAP` (PNP0C14:02, "Mi AP") |
 | ACPI methods (per WMI-ACPI spec) | `\_SB.MIAP.WSAA(inst, buf32)` = write, `\_SB.MIAP.WQAA(inst)` = read |
 | Event class | `TMA_WMIEvent` (property `EventDetail`) → most likely GUID `B74AF83F-8B2F-4069-ACAC-36D176F62FC0`, notify `0x80`, also on `\_SB.MIAP` |

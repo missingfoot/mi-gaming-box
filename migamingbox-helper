@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 James Sparkes
 """Root helper for the GUI, started through pkexec.
 
-polkit authorises it via com.jamessparkes.migamingbox.helper, which matches
+polkit authorises it via io.github.missingfoot.migamingbox.helper, which matches
 this file's installed path (/usr/lib/mi-gaming-box/migamingbox-helper).
 
 Thin launcher: the code lives in migamingboxlib/ next to this script (dev

@@ -1,6 +1,8 @@
 [Unit]
 Description=Xiaomi Mi Gaming Laptop macro keys
 After=systemd-modules-load.service
+# Only start on the supported laptop (override with a drop-in if you know better).
+ConditionFirmware=smbios-field(product_name = TM1801)
 
 [Service]
 ExecStartPre=-/usr/bin/modprobe acpi_call

@@ -3,7 +3,7 @@
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <policyconfig>
   <vendor>Mi Gaming Box</vendor>
-  <action id="com.jamessparkes.migamingbox.helper">
+  <action id="io.github.missingfoot.migamingbox.helper">
     <description>Control the Mi Gaming Laptop's fans, lighting and keyboard</description>
     <message>Mi Gaming Box needs access to the laptop's firmware controls</message>
     <icon_name>migamingbox</icon_name>

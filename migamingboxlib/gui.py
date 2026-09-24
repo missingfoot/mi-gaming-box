@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 James Sparkes
 """Mi Gaming Box for Linux: PySide6 control panel for the Xiaomi Mi Gaming Laptop (TM1801).
 
 Runs as your user. Hardware access goes through a small root helper

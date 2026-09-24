@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 James Sparkes
 """Macro-key daemon for the Xiaomi Mi Gaming Laptop (TM1801).
 
 The five extra keys don't send normal key codes. The EC raises ACPI queries
@@ -6,7 +8,7 @@ EVT0=0x0200, EVT1=1..5 (press) / 6..10 (release), and fire WMI event B74AF83F (n
 No kernel driver handles that event, but the WMI core still broadcasts it on
 the ACPI netlink channel. This daemon listens there, reads the event buffer via
 _WED, and turns each key into a virtual key press on a uinput keyboard. Bind
-the keys in KDE System Settings -> Shortcuts.
+the keys in your desktop's keyboard shortcut settings.
 
     sudo mikeysd --probe           # print every event; press each key to see its number
     sudo mikeysd                   # run with the mapping in /etc/mi-gaming-box/keys.conf
