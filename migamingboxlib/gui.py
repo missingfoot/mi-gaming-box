@@ -1490,12 +1490,22 @@ class LogPage(Page):
 
 # --------------------------------------------------------------------------
 
-def make_icon(turbo=False):
+def app_icon():
+    """The installed orange "Mi" icon (also used by the app menu); in a dev checkout
+    the repo's copy; drawn as a last resort."""
+    repo_png = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "migamingbox.png")
+    if QIcon.hasThemeIcon("migamingbox"):
+        return QIcon.fromTheme("migamingbox")
+    return QIcon(repo_png) if os.path.exists(repo_png) else make_icon()
+
+
+def make_icon():
     pm = QPixmap(64, 64)
     pm.fill(Qt.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.Antialiasing)
-    p.setBrush(QColor("#ff6700" if turbo else "#3daee9"))
+    p.setBrush(QColor("#ff6700"))
     p.setPen(Qt.NoPen)
     p.drawRoundedRect(4, 4, 56, 56, 14, 14)
     p.setPen(QColor("white"))
@@ -1519,7 +1529,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.settings = QSettings("mi-gaming-box", "migamingbox")
         self.setWindowTitle(APP_NAME)
-        self.setWindowIcon(make_icon())
+        self.setWindowIcon(app_icon())
         self.resize(1000, 720)
 
         self.dash = DashboardPage(self)

@@ -71,7 +71,7 @@ The Debian/Ubuntu and Fedora package names are best-effort and untested. Correct
 - **Mi Gaming Box** (in your app menu, or `migamingbox`) is the control panel.
   It's laid out like a settings app: a Dashboard (Turbo, fans, temperatures and system info), Settings, Keyboard lighting,
   Ambient lights, Macro keys and Log, with Defaults / Reset / Apply along the bottom for the
-  lighting pages. There's also a tray icon that turns orange in Turbo mode. No password is needed in your normal desktop session:
+  lighting pages. There's also a tray icon with Turbo mode and the switches. No password is needed in your normal desktop session:
   polkit authorises its small root helper. Options: `--tray` starts it hidden,
   `--demo` runs it without hardware. The Settings page has "Start at login" and
   "Re-apply lighting when the app starts". Tick both to keep your lighting across
