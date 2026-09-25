@@ -21,7 +21,7 @@ interface was worked out is documented in [FINDINGS.md](FINDINGS.md).
 | Fn lock, Windows key, touchpad, power-button LED | ✅ reading tested, switching expected to work |
 | Keyboard backlight on/off | ✅ tested |
 | Keyboard RGB (4 areas, brightness 0–5, speed, Static / Breath effects) | ✅ tested (`tools/kbdtest`) |
-| Rear light bars (left / right, colour cycle) | 🧪 implemented, needs testers |
+| Ambient light bars (left / right: off, steady, breathing, colour cycle) | ✅ works (TM1801) |
 
 Only tested on **TM1801** (`cat /sys/class/dmi/id/product_name`). On any other
 machine the tools refuse to touch the firmware. If you have a related Xiaomi model
@@ -69,10 +69,14 @@ The Debian/Ubuntu and Fedora package names are best-effort and untested. Correct
 ## Usage
 
 - **Mi Gaming Box** (in your app menu, or `migamingbox`) is the control panel.
-  It has tabs for Performance, System, Lighting and Advanced, plus a tray icon that
-  turns orange in Turbo mode. No password is needed in your normal desktop session:
+  It's laid out like a settings app: a Dashboard (Turbo, fans, settings, temperatures and system info), Keyboard lighting,
+  Ambient lights and Advanced, with Defaults / Reset / Apply along the bottom for the
+  lighting pages. There's also a tray icon that turns orange in Turbo mode. No password is needed in your normal desktop session:
   polkit authorises its small root helper. Options: `--tray` starts it hidden,
-  `--demo` runs it without hardware.
+  `--demo` runs it without hardware. Dashboard → Settings has "Start at login" and
+  "Re-apply lighting when the app starts". Tick both to keep your lighting across
+  reboots (the keyboard's lighting chip resets at shutdown, as on Windows, where
+  GamingBox starts itself at logon to put it back).
 - **Macro keys**: `mikeysd.service` turns the five keys (top to bottom) into
   F13–F17. Bind them in your desktop's keyboard shortcut settings (in KDE they may
   show up as "Tools" / "Launch5"–"Launch8"). To remap them, edit
@@ -80,14 +84,14 @@ The Debian/Ubuntu and Fedora package names are best-effort and untested. Correct
   `sudo systemctl restart mikeysd`. `sudo mikeysd --probe` shows raw key events.
 - **CLI**: `sudo miwmi status`, `sudo miwmi turbo on|off`,
   `sudo miwmi fnlock|winlock|touchpad|powerled|kbdlight on|off`, and
+  `sudo miwmi light` to read the ambient lights' settings, and
   `sudo miwmi raw FA00 0102` for any raw command.
 
 ## Help wanted
 
-- **Lighting**: if you own a TM1801, try the Lighting tab and open an issue with
-  what happened. Useful details: did each keyboard area change, are the colours
-  right or red/blue swapped, and which `LEDZ` values in *Advanced → Zone probe*
-  light the rear bars.
+- **Lighting**: if you own a TM1801, try the Keyboard lighting and Ambient lights pages
+  and open an issue with what happened. Useful details: did each keyboard area change,
+  and are the colours right or red/blue swapped.
 - **Other distros**: working package names and install steps.
 - **Kernel driver**: the natural next step is a small `platform/x86` WMI driver,
   so the macro keys and turbo don't need acpi_call.

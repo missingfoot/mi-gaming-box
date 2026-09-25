@@ -11,20 +11,35 @@ import sys
 import threading
 import traceback
 
-from PySide6.QtCore import QObject, QSettings, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
+from PySide6.QtCore import QEvent, QObject, QSettings, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPalette, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QColorDialog, QComboBox, QFormLayout, QGridLayout,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
-    QPlainTextEdit, QPushButton, QSlider, QSpinBox, QSystemTrayIcon, QTabWidget,
-    QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QColorDialog, QComboBox, QFormLayout, QFrame, QGridLayout,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
+    QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSlider,
+    QSpinBox, QStackedWidget,
+    QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 
-from migamingboxlib import miwmi
+from migamingboxlib import miwmi, sysinfo
 
 APP_NAME = "Mi Gaming Box"
 POLL_MS = 2000
+PAGE_MARGINS = (16, 12, 16, 12)
+# Like GamingBox's /AutoRun logon task on Windows: start hidden in the tray at login,
+# so "Re-apply lighting" can restore the keyboard after the chip resets at shutdown.
+AUTOSTART = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                         "autostart", "migamingbox.desktop")
+AUTOSTART_ENTRY = """[Desktop Entry]
+Type=Application
+Name=Mi Gaming Box
+Comment=Starts Mi Gaming Box in the tray
+Exec=migamingbox --tray
+Icon=migamingbox
+Terminal=false
+X-GNOME-Autostart-enabled=true
+"""
 
 
 # --------------------------------------------------------------------------
@@ -146,13 +161,18 @@ def slider(lo, hi, val):
     return s
 
 
-def big_label(text=""):
-    lab = QLabel(text)
-    f = lab.font()
-    f.setPointSize(f.pointSize() + 8)
-    f.setBold(True)
-    lab.setFont(f)
-    return lab
+def hline():
+    f = QFrame()
+    f.setFrameShape(QFrame.HLine)
+    f.setFrameShadow(QFrame.Sunken)
+    return f
+
+
+def vline():
+    f = QFrame()
+    f.setFrameShape(QFrame.VLine)
+    f.setFrameShadow(QFrame.Sunken)
+    return f
 
 
 def int_list(value, default):
@@ -164,44 +184,296 @@ def int_list(value, default):
     return [int(v) for v in value]
 
 
+def as_bool(value):
+    """QSettings gives back "true"/"false" after a restart but the bool itself in-session."""
+    return value is True or str(value).lower() == "true"
+
+
 def status_ok(reply):
     return reply is not None and getattr(reply, "ok", True)
 
 
-# --------------------------------------------------------------------------
-# Tabs
+def theme_icon(*names):
+    for n in names:
+        if QIcon.hasThemeIcon(n):
+            return QIcon.fromTheme(n)
+    return QIcon()
 
-class PerformanceTab(QWidget):
+
+# --------------------------------------------------------------------------
+# Pages. A page with apply=True gets the bottom bar's Defaults / Reset / Apply;
+# the others act the moment you click something.
+
+class Page(QWidget):
+    changed = Signal()
+    title = ""
+    icon = ()
+    has_apply = False
+
+    def dirty(self):
+        return False
+
+    def apply(self):
+        pass
+
+    def reset(self):
+        pass
+
+    def defaults(self):
+        pass
+
+
+class Meter(QWidget):
+    """Label, big value on the right, thin bar underneath (the style of the Temps app).
+    warn/crit colour the value and bar amber/red; without them the bar uses the accent."""
+    GOOD, WARN, CRIT = "#52c97a", "#e0a852", "#e05252"
+
+    def __init__(self, label, maximum=100, warn=None, crit=None, big=False):
+        super().__init__()
+        self.maximum, self.warn, self.crit = maximum, warn, crit
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        top = QHBoxLayout()
+        self.name = QLabel(label)
+        self.value = QLabel("–")
+        self.value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.size = 20 if big else 14
+        self.value.setStyleSheet(f"font-size: {self.size}px; font-weight: 600;")
+        top.addWidget(self.name)
+        top.addStretch()
+        top.addWidget(self.value)
+        lay.addLayout(top)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 1000)
+        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(6)
+        lay.addWidget(self.bar)
+        self.colour = None
+        self._colour(None)
+
+    def changeEvent(self, e):
+        if e.type() == QEvent.PaletteChange:  # theme switched: recompute the track colour
+            self._colour(self.colour)
+        super().changeEvent(e)
+
+    def _colour(self, colour):
+        self.colour = colour
+        chunk = colour or "palette(highlight)"
+        # The empty part of the bar: the text colour at low opacity, so it shows on
+        # any theme (palette(mid) is almost the background colour in Breeze Dark).
+        t = self.palette().color(QPalette.WindowText)
+        track = f"rgba({t.red()}, {t.green()}, {t.blue()}, 45)"
+        self.bar.setStyleSheet(
+            f"QProgressBar {{ background: {track}; border: none; border-radius: 3px; }}"
+            f"QProgressBar::chunk {{ background: {chunk}; border-radius: 3px; }}")
+        self.value.setStyleSheet(f"font-size: {self.size}px; font-weight: 600;"
+                                 + (f" color: {colour};" if colour else ""))
+
+    def set(self, value, text=None, maximum=None):
+        if maximum:
+            self.maximum = maximum
+        if value is None:
+            self.value.setText(text or "–")
+            self.bar.setValue(0)
+            self._colour(None)
+            return
+        self.value.setText(text if text is not None else f"{value:.0f}")
+        self.bar.setValue(int(1000 * max(0.0, min(1.0, value / self.maximum))))
+        if self.warn is None:
+            self._colour(None)
+        else:
+            self._colour(self.CRIT if value >= self.crit else self.WARN if value >= self.warn
+                         else self.GOOD)
+
+
+class InfoForm(QFormLayout):
+    """Label: value rows whose values can be updated by key."""
+
+    def __init__(self):
+        super().__init__()
+        self.rows = {}
+        self.setLabelAlignment(Qt.AlignLeft)
+
+    def row(self, key, label=None):
+        if key not in self.rows:
+            v = QLabel("–")
+            v.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            v.setWordWrap(True)
+            self.rows[key] = v
+            self.addRow(QLabel(label or key), v)
+        return self.rows[key]
+
+    def set(self, key, text, label=None):
+        self.row(key, label).setText(str(text) if text not in (None, "") else "–")
+
+
+def section(title):
+    box = QGroupBox(title)
+    lay = QVBoxLayout(box)
+    lay.setSpacing(10)
+    return box, lay
+
+
+def temp_meter(label, big=False):
+    return Meter(label, maximum=100, warn=70, crit=85, big=big)
+
+
+class InfoPoller(QObject):
+    """Runs sysinfo.live() on a thread (nvidia-smi can take a while) and hands the
+    result back to the GUI thread."""
+    ready = Signal(object)
+
+    def __init__(self, static):
+        super().__init__()
+        self.static, self.prev, self.busy = static, None, False
+
+    def poll(self):
+        if self.busy:
+            return
+        self.busy = True
+
+        def work():
+            try:
+                self.prev = sysinfo.live(self.prev, self.static)
+                self.ready.emit(self.prev)
+            except Exception:
+                traceback.print_exc()
+            finally:
+                self.busy = False
+        threading.Thread(target=work, daemon=True).start()
+
+
+class DashboardPage(Page):
+    title = "Dashboard"
+    icon = ("go-home-symbolic", "go-home")
+    FAN_MAX = 7000  # turbo runs both fans at ~6700 rpm
+
     def __init__(self, win):
         super().__init__()
         self.win = win
-        lay = QVBoxLayout(self)
+        self.static = sysinfo.static()
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        body = QWidget()
+        scroll.setWidget(body)
+        outer.addWidget(scroll)
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(*PAGE_MARGINS)
 
-        box = QGroupBox("Turbo fan mode")
-        bl = QHBoxLayout(box)
-        self.turbo = QPushButton("Turbo OFF")
+        # --- Turbo + the EC's own readings
+        top, tl = section("Cooling")
+        # A checkable button: it looks pressed in while Turbo is on.
+        self.turbo = QPushButton("Turbo mode")
         self.turbo.setCheckable(True)
-        self.turbo.setMinimumHeight(56)
-        f = self.turbo.font()
-        f.setPointSize(f.pointSize() + 4)
-        self.turbo.setFont(f)
         self.turbo.clicked.connect(self._toggle)
-        bl.addWidget(self.turbo)
-        lay.addWidget(box)
+        self.cpu_t, self.gpu_t = temp_meter("CPU"), temp_meter("GPU")
+        self.fan1 = Meter("Fan 1", self.FAN_MAX)
+        self.fan2 = Meter("Fan 2", self.FAN_MAX)
+        for m in (self.cpu_t, self.gpu_t, self.fan1, self.fan2):
+            tl.addWidget(m)
+        tl.addWidget(self.turbo, 0, Qt.AlignLeft)
+        self.switches = SettingsBox(win)
 
-        grid_box = QGroupBox("Sensors")
-        g = QGridLayout(grid_box)
-        self.cpu_t, self.gpu_t = big_label("–"), big_label("–")
-        self.fan1, self.fan2 = big_label("–"), big_label("–")
-        for col, (name, w) in enumerate([("CPU", self.cpu_t), ("GPU", self.gpu_t),
-                                         ("Fan 1", self.fan1), ("Fan 2", self.fan2)]):
-            cap = QLabel(name)
-            cap.setAlignment(Qt.AlignCenter)
-            w.setAlignment(Qt.AlignCenter)
-            g.addWidget(w, 0, col)
-            g.addWidget(cap, 1, col)
-        lay.addWidget(grid_box)
+        cols = QGridLayout()
+        cols.setHorizontalSpacing(12)
+        cols.setVerticalSpacing(12)
+        lay.addLayout(cols)
+
+        # --- Temperatures (every hwmon sensor, filled in on the first poll)
+        self.temps_box, self.temps_lay = section("Temperatures")
+        self.temp_meters = {}
+
+        # --- CPU
+        cpu, cl = section("Processor")
+        self.cpu_form = InfoForm()
+        self.cpu_form.set("model", self.static["cpu_model"], "Model")
+        self.cpu_form.set("cores", f"{self.static['cores']} cores, {self.static['threads']} threads",
+                          "Cores")
+        cl.addLayout(self.cpu_form)
+        self.cpu_use = Meter("Usage", 100, warn=80, crit=95)
+        self.cpu_freq = Meter("Clock", self.static["cpu_max_mhz"] or 5000)
+        cl.addWidget(self.cpu_use)
+        cl.addWidget(self.cpu_freq)
+        self.cpu_form2 = InfoForm()
+        cl.addLayout(self.cpu_form2)
+
+        # --- GPUs
+        gpu, gl = section("Graphics")
+        self.gpu_widgets = []
+        for slot, name, _d in self.static["gpus"]:
+            form = InfoForm()
+            form.set("name", name, "GPU")
+            gl.addLayout(form)
+            meters = {}
+            if "NVIDIA" in name:
+                meters = {"temp": temp_meter("Temperature"),
+                          "util": Meter("Load", 100),
+                          "power": Meter("Power", 80, warn=56, crit=72),
+                          "mem": Meter("Memory", 100)}
+                for m in meters.values():
+                    gl.addWidget(m)
+            self.gpu_widgets.append((form, meters))
+
+        # --- Memory
+        mem, ml = section("Memory")
+        self.ram, self.swap = Meter("RAM", 100, warn=80, crit=92), Meter("Swap", 100)
+        ml.addWidget(self.ram)
+        ml.addWidget(self.swap)
+
+        # --- Storage
+        disk, dl = section("Storage")
+        if self.static["nvme"]:
+            f = InfoForm()
+            f.set("drive", ", ".join(self.static["nvme"]), "Drive")
+            dl.addLayout(f)
+        self.disk_meters = {}
+        for mnt, fs in self.static["disks"]:
+            self.disk_meters[mnt] = Meter(f"{mnt}  ({fs})", 100, warn=85, crit=95)
+            dl.addWidget(self.disk_meters[mnt])
+
+        # --- Battery
+        bat, bl = section("Battery")
+        self.bat = Meter("Charge", 100)
+        bl.addWidget(self.bat)
+        self.bat_form = InfoForm()
+        bl.addLayout(self.bat_form)
+
+        # --- System + network
+        system, sl = section("System")
+        self.sys_form = InfoForm()
+        for label, val in self.static["system"]:
+            self.sys_form.set(label, val)
+        sl.addLayout(self.sys_form)
+        self.net_form = InfoForm()
+        sl.addLayout(self.net_form)
+
+        boxes = (top, self.switches, self.temps_box, cpu, gpu, mem, bat, disk, system)
+        for i, box in enumerate(boxes):
+            if box is not self.switches:
+                box.layout().addStretch()
+            cols.addWidget(box, i // 2, i % 2)
+        cols.setColumnStretch(0, 1)
+        cols.setColumnStretch(1, 1)
         lay.addStretch()
+
+        self.poller = InfoPoller(self.static)
+        self.poller.ready.connect(self.update_info)
+        self.info_timer = QTimer(self)
+        self.info_timer.timeout.connect(self.poller.poll)
+
+    # Only poll the system while this page is on screen.
+    def showEvent(self, e):
+        self.poller.poll()
+        self.info_timer.start(POLL_MS)
+        super().showEvent(e)
+
+    def hideEvent(self, e):
+        self.info_timer.stop()
+        super().hideEvent(e)
 
     def _toggle(self, on):
         self.win.dev.run(lambda w: w.set_turbo(on), lambda r: self.win.refresh_fan())
@@ -212,14 +484,99 @@ class PerformanceTab(QWidget):
         f1, f2, cpu, gpu = r.words
         on = bool(r.value)
         self.turbo.setChecked(on)
-        self.turbo.setText("Turbo ON" if on else "Turbo OFF")
-        self.cpu_t.setText(f"{cpu} °C")
-        self.gpu_t.setText(f"{gpu} °C")
-        self.fan1.setText(f"{f1} rpm")
-        self.fan2.setText(f"{f2} rpm")
+        self.cpu_t.set(cpu, f"{cpu} °C")
+        self.gpu_t.set(gpu, f"{gpu} °C")
+        self.fan1.set(f1, f"{f1} rpm")
+        self.fan2.set(f2, f"{f2} rpm")
+
+    def update_info(self, d):
+        # temperatures
+        temps = d["temps"]
+        cores = [t for g, l, t in temps if g == "CPU" and l.startswith("Core")]
+        shown = []
+        for g, l, t in temps:
+            if g == "CPU" and l.startswith("Core") or g == "NVMe" and l.startswith("Sensor"):
+                continue
+            label = {"Package": "CPU package", "Composite": "NVMe SSD"}.get(l, l)
+            shown.append((0 if label == "CPU package" else 1, label, t))
+        if cores:
+            shown.append((0, "CPU hottest core", max(cores)))
+        shown = [(label, t) for _, label, t in sorted(shown, key=lambda x: x[0])]
+        for label, t in shown:
+            if label not in self.temp_meters:
+                self.temp_meters[label] = temp_meter(label)
+                self.temps_lay.insertWidget(self.temps_lay.count() - 1, self.temp_meters[label])
+            self.temp_meters[label].set(t, f"{t:.0f} °C")
+
+        # cpu
+        u = d["cpu_usage"]
+        self.cpu_use.set(u, f"{u} %" if u is not None else "–")
+        self.cpu_freq.set(d["cpu_mhz"], f"{d['cpu_mhz'] / 1000:.2f} GHz (peak {d['cpu_peak_mhz'] / 1000:.2f})")
+        self.cpu_form2.set("load", " ".join(d["load"]), "Load average")
+        self.cpu_form2.set("gov", f"{d['governor']}" + (f" / {d['epp']}" if d["epp"] else ""),
+                           "Governor")
+        if d["boost"] is not None:
+            self.cpu_form2.set("boost", "on" if d["boost"] else "off", "Turbo Boost")
+
+        # gpus
+        for (form, meters), g in zip(self.gpu_widgets, d["gpus"]):
+            nv = g["nvidia"]
+            state = {"active": "active", "suspended": "asleep (saving power)"}.get(g["state"], g["state"])
+            if g["freq"]:
+                state += f", {g['freq']} MHz"
+            if nv:
+                state += f", {nv['pstate']}, {nv['clock']:.0f} MHz"
+            form.set("state", state, "State")
+            if meters:
+                if nv:
+                    meters["temp"].set(nv["temp"], f"{nv['temp']:.0f} °C")
+                    meters["util"].set(nv["util"], f"{nv['util']:.0f} %")
+                    lim = nv["limit"] or 80
+                    meters["power"].warn, meters["power"].crit = lim * 0.7, lim * 0.9
+                    meters["power"].set(nv["power"], f"{nv['power']:.1f} W", maximum=lim)
+                    meters["mem"].set(nv["mem_used"], f"{nv['mem_used']:.0f} / {nv['mem_total']:.0f} MiB",
+                                      maximum=nv["mem_total"])
+                else:
+                    for m in meters.values():
+                        m.set(None, "asleep")
+
+        # memory
+        used, total, sused, stotal = d["memory"]
+        self.ram.set(100 * used / total if total else None,
+                     f"{sysinfo.human_bytes(used)} / {sysinfo.human_bytes(total)}")
+        self.swap.set(100 * sused / stotal if stotal else None,
+                      f"{sysinfo.human_bytes(sused)} / {sysinfo.human_bytes(stotal)}" if stotal else "none")
+
+        # storage
+        for mnt, fs, used, total in d["disks"]:
+            if mnt in self.disk_meters and total:
+                self.disk_meters[mnt].set(100 * used / total,
+                                          f"{sysinfo.human_bytes(used)} / {sysinfo.human_bytes(total)}")
+
+        # battery
+        b = d["battery"]
+        if b:
+            self.bat.name.setText(f"Charge ({b['name']})")
+            self.bat.set(b["capacity"], f"{b['capacity']} %")
+            power = "AC connected" if d["ac"] else "on battery"
+            self.bat_form.set("status", f"{b['status']}, {power}", "Status")
+            if b["watts"]:
+                self.bat_form.set("draw", f"{b['watts']:.1f} W", "Power")
+            if b["health"]:
+                self.bat_form.set("health", f"{b['health']} % of design capacity", "Health")
+            if b["cycles"]:
+                self.bat_form.set("cycles", b["cycles"], "Cycles")
+        else:
+            self.bat.set(None, "no battery")
+
+        # system
+        self.sys_form.set("Uptime", sysinfo.human_duration(d["uptime"]))
+        for iface, addr in d["network"]:
+            self.net_form.set(iface, addr, f"IP ({iface})")
 
 
-class SystemTab(QWidget):
+class SettingsBox(QGroupBox):
+    """Hardware switches plus the app's own start-up options."""
     LABELS = {
         "fnlock": "Fn lock (F-keys act as media keys)",
         "winlock": "Windows key enabled",
@@ -227,12 +584,10 @@ class SystemTab(QWidget):
     }
 
     def __init__(self, win):
-        super().__init__()
+        super().__init__("Settings")
         self.win = win
-        lay = QVBoxLayout(self)
-
-        box = QGroupBox("Switches")
-        bl = QVBoxLayout(box)
+        bl = QVBoxLayout(self)
+        bl.setSpacing(10)
         self.checks = {}
         for key, text in self.LABELS.items():
             cb = QCheckBox(text)
@@ -243,13 +598,29 @@ class SystemTab(QWidget):
         self.kbbl = QCheckBox("Keyboard backlight")
         self.kbbl.clicked.connect(self._set_kb)
         bl.addWidget(self.kbbl)
-        note = QLabel("Values are the raw EC bits (1 = on). If a label reads inverted "
-                      "on your machine, it's the firmware's sense of the bit.")
-        note.setWordWrap(True)
-        note.setStyleSheet("color: palette(placeholder-text);")
-        bl.addWidget(note)
-        lay.addWidget(box)
-        lay.addStretch()
+        self.login = QCheckBox("Start at login (in the tray)")
+        self.login.setChecked(os.path.exists(AUTOSTART))
+        self.login.toggled.connect(self._set_autostart)
+        bl.addWidget(self.login)
+        self.on_start = QCheckBox("Re-apply lighting when the app starts")
+        self.on_start.setChecked(as_bool(win.settings.value("apply_on_start", "false")))
+        self.on_start.toggled.connect(lambda on: win.settings.setValue("apply_on_start", on))
+        bl.addWidget(self.on_start)
+        bl.addStretch()
+
+    def _set_autostart(self, on):
+        try:
+            if on:
+                os.makedirs(os.path.dirname(AUTOSTART), exist_ok=True)
+                with open(AUTOSTART, "w") as f:
+                    f.write(AUTOSTART_ENTRY)
+            elif os.path.exists(AUTOSTART):
+                os.remove(AUTOSTART)
+        except OSError as e:
+            self.win.show_status(f"Autostart: {e}", 5000)
+            self.login.blockSignals(True)
+            self.login.setChecked(os.path.exists(AUTOSTART))
+            self.login.blockSignals(False)
 
     def _set(self, key, on):
         self.win.dev.run(lambda w: w.set_switch(key, on), lambda r: self.refresh())
@@ -272,13 +643,21 @@ class SystemTab(QWidget):
 
 
 class BarEditor(QGroupBox):
-    """Colour list + brightness + speed for one rear light bar."""
+    """Mode + colour list + brightness + speed for one ambient light bar."""
+    PER_ROW = 4  # colour drop-downs per row, so 8 colours don't widen the window
+    changed = Signal()
 
     def __init__(self, title, zone, settings, key):
         super().__init__(title)
         self.zone, self.settings, self.key = zone, settings, key
         lay = QFormLayout(self)
-        self.colours_row = QHBoxLayout()
+        self.mode = QComboBox()
+        for name, val in miwmi.BAR_MODES.items():
+            self.mode.addItem(name, val)
+        self.mode.currentIndexChanged.connect(self._sync)
+        lay.addRow("Mode", self.mode)
+        self.colours_grid = QGridLayout()
+        self.colours_grid.setContentsMargins(0, 0, 0, 0)
         self.buttons = []
         self.add_btn = QPushButton("+")
         self.add_btn.setFixedWidth(28)
@@ -289,27 +668,45 @@ class BarEditor(QGroupBox):
         row = QWidget()
         rl = QHBoxLayout(row)
         rl.setContentsMargins(0, 0, 0, 0)
-        rl.addLayout(self.colours_row)
-        rl.addWidget(self.add_btn)
-        rl.addWidget(self.del_btn)
+        rl.addLayout(self.colours_grid)
+        rl.addWidget(self.add_btn, 0, Qt.AlignTop)
+        rl.addWidget(self.del_btn, 0, Qt.AlignTop)
         rl.addStretch()
-        lay.addRow("Colours", row)
-        self.bright = slider(0, 5, int(settings.value(f"{key}/brightness", 2)))
-        self.speed = slider(0, 5, int(settings.value(f"{key}/speed", 2)))
+        self.colours_label = QLabel("Colours")
+        lay.addRow(self.colours_label, row)
+        self.bright = slider(0, miwmi.BAR_BRIGHTNESS_MAX, miwmi.BAR_BRIGHTNESS_MAX)
+        self.speed = slider(0, miwmi.BAR_SPEED_MAX, 0)
         lay.addRow("Brightness", self.bright)
         lay.addRow("Speed", self.speed)
-        hint = QLabel("1 colour = static, several = colour cycle")
-        hint.setStyleSheet("color: palette(placeholder-text);")
-        lay.addRow(hint)
-        for c in int_list(settings.value(f"{key}/colours"), [0x00A0FF]):
+        self.bright.valueChanged.connect(self.changed)
+        self.speed.valueChanged.connect(self.changed)
+        self.set_values(*self.saved())
+
+    def saved(self):
+        f, s, k = miwmi.BAR_FACTORY, self.settings, self.key
+        return (int(s.value(f"{k}/mode", f["effect"])),
+                int_list(s.value(f"{k}/colours"), f["colours"]),
+                min(miwmi.BAR_SPEED_MAX, int(s.value(f"{k}/speed", f["speed"]))),
+                min(miwmi.BAR_BRIGHTNESS_MAX, int(s.value(f"{k}/brightness", f["brightness"]))))
+
+    def set_values(self, mode, colours, speed, brightness):
+        self.mode.setCurrentIndex(self.mode.findData(mode))
+        while self.buttons:
+            self.buttons.pop().deleteLater()
+        for c in colours:
             self._add(c)
+        self.speed.setValue(speed)
+        self.bright.setValue(brightness)
+        self._sync()
 
     def _add(self, rgb):
         if len(self.buttons) >= miwmi.MAX_COLOURS:
             return
         b = ColourCombo(rgb)
+        b.changed.connect(self.changed)
+        n = len(self.buttons)
         self.buttons.append(b)
-        self.colours_row.addWidget(b)
+        self.colours_grid.addWidget(b, n // self.PER_ROW, n % self.PER_ROW)
         self._sync()
 
     def _remove(self):
@@ -318,129 +715,184 @@ class BarEditor(QGroupBox):
         self._sync()
 
     def _sync(self):
+        """Only Colour cycle uses the whole list; Steady/Breathing use the first colour."""
+        mode = self.mode.currentData()
+        cycle = mode == miwmi.BAR_CYCLE
+        for i, b in enumerate(self.buttons):
+            b.setVisible(mode != miwmi.BAR_OFF and (cycle or i == 0))
+        self.colours_label.setText("Colours" if cycle else "Colour")
+        self.add_btn.setVisible(cycle)
+        self.del_btn.setVisible(cycle)
         self.add_btn.setEnabled(len(self.buttons) < miwmi.MAX_COLOURS)
         self.del_btn.setEnabled(len(self.buttons) > 1)
+        self.speed.setEnabled(mode in (miwmi.BAR_BREATH, miwmi.BAR_CYCLE))
+        self.bright.setEnabled(mode != miwmi.BAR_OFF)
+        self.changed.emit()
 
     def values(self):
-        return [b.rgb for b in self.buttons], self.speed.value(), self.bright.value()
+        return (self.mode.currentData(), [b.rgb for b in self.buttons],
+                self.speed.value(), self.bright.value())
 
     def save(self):
-        cols, spd, bri = self.values()
+        mode, cols, spd, bri = self.values()
+        self.settings.setValue(f"{self.key}/mode", mode)
         self.settings.setValue(f"{self.key}/colours", cols)
         self.settings.setValue(f"{self.key}/speed", spd)
         self.settings.setValue(f"{self.key}/brightness", bri)
 
-    def apply(self, dev):
-        cols, spd, bri = self.values()
-        self.save()
-        dev.run(lambda w: w.apply_bar(self.zone, cols, spd, bri))
 
+class KeyboardPage(Page):
+    title = "Keyboard lighting"
+    icon = ("input-keyboard", "preferences-desktop-keyboard")
+    has_apply = True
+    DEFAULTS = {"effect": 0, "areas": [0xFF0000, 0x0000FF, 0x00FF00, 0xFF8000], "same": False,
+                "brightness": miwmi.KBD_BRIGHTNESS_MAX, "speed": 2}
 
-class LightingTab(QWidget):
     def __init__(self, win):
         super().__init__()
         self.win = win
-        s = win.settings
         lay = QVBoxLayout(self)
-
-        kb = QGroupBox("Keyboard")
-        kl = QFormLayout(kb)
+        form = QFormLayout()
         self.effect = QComboBox()
         for name, val in miwmi.KBD_EFFECTS.items():
             self.effect.addItem(name, val)
-        self.effect.setCurrentIndex(min(int(s.value("kbd/effect", 0)), self.effect.count() - 1))
-        kl.addRow("Effect", self.effect)
+        form.addRow("Effect", self.effect)
 
         areas = QWidget()
         al = QHBoxLayout(areas)
         al.setContentsMargins(0, 0, 0, 0)
-        saved = int_list(s.value("kbd/areas"), [0xFF0000, 0x0000FF, 0x00FF00, 0xFF8000])
         self.areas = []
         for i, name in enumerate("ABCD"):
             al.addWidget(QLabel(name))
-            b = ColourCombo(saved[i])
+            b = ColourCombo()
             b.changed.connect(lambda rgb, i=i: self._area_changed(i, rgb))
             self.areas.append(b)
             al.addWidget(b)
         al.addStretch()
-        kl.addRow("Area colours", areas)
+        form.addRow("Area colours", areas)
         self.same = QCheckBox("Use area A colour for all areas")
-        self.same.setChecked(s.value("kbd/same", "false") == "true")
         self.same.toggled.connect(lambda on: on and self._area_changed(0, self.areas[0].rgb))
-        kl.addRow(self.same)
-        self.kb_bright = slider(0, 5, int(s.value("kbd/brightness", 5)))
-        self.kb_speed = slider(0, miwmi.KBD_SPEED_MAX, int(s.value("kbd/speed", 2)))
-        kl.addRow("Brightness", self.kb_bright)
-        kl.addRow("Speed", self.kb_speed)
-        kb_apply = QPushButton("Apply")
-        kb_apply.clicked.connect(self.apply_keyboard)
-        kl.addRow(kb_apply)
-        lay.addWidget(kb)
-
-        bars = QHBoxLayout()
-        self.left = BarEditor("Left light", miwmi.ZONE_BAR_LEFT, s, "left")
-        self.right = BarEditor("Right light", miwmi.ZONE_BAR_RIGHT, s, "right")
-        bars.addWidget(self.left)
-        bars.addWidget(self.right)
-        lay.addLayout(bars)
-        bar_row = QHBoxLayout()
-        self.same_bars = QCheckBox("Right light same as left")
-        self.same_bars.setChecked(s.value("bars/same", "true") == "true")
-        self.same_bars.toggled.connect(self.right.setDisabled)
-        self.right.setDisabled(self.same_bars.isChecked())
-        bar_apply = QPushButton("Apply rear lights")
-        bar_apply.clicked.connect(self.apply_bars)
-        bar_row.addWidget(self.same_bars)
-        bar_row.addStretch()
-        bar_row.addWidget(bar_apply)
-        lay.addLayout(bar_row)
-
-        foot = QHBoxLayout()
-        self.on_start = QCheckBox("Re-apply lighting when the app starts")
-        self.on_start.setChecked(s.value("apply_on_start", "false") == "true")
-        self.on_start.toggled.connect(lambda on: s.setValue("apply_on_start", on))
-        foot.addWidget(self.on_start)
-        lay.addLayout(foot)
-        note = QLabel("Lighting zone numbers for the rear bars (1/2) are inferred. "
-                      "Use Advanced → Zone probe if nothing lights up.")
-        note.setWordWrap(True)
-        note.setStyleSheet("color: palette(placeholder-text);")
-        lay.addWidget(note)
+        form.addRow(self.same)
+        self.bright = slider(0, miwmi.KBD_BRIGHTNESS_MAX, miwmi.KBD_BRIGHTNESS_MAX)
+        self.speed = slider(0, miwmi.KBD_SPEED_MAX, 2)
+        form.addRow("Brightness", self.bright)
+        form.addRow("Speed", self.speed)
+        lay.addLayout(form)
         lay.addStretch()
+        for sig in (self.effect.currentIndexChanged, self.same.toggled,
+                    self.bright.valueChanged, self.speed.valueChanged):
+            sig.connect(self.changed)
+        self.reset()
 
     def _area_changed(self, i, rgb):
         if self.same.isChecked():
             for b in self.areas:
                 b.set_rgb(self.areas[0].rgb if i != 0 else rgb)
+        self.changed.emit()
 
-    def apply_keyboard(self):
-        s = self.win.settings
-        cols = [b.rgb for b in self.areas]
-        eff, spd, bri = self.effect.currentData(), self.kb_speed.value(), self.kb_bright.value()
-        s.setValue("kbd/effect", self.effect.currentIndex())
-        s.setValue("kbd/areas", cols)
-        s.setValue("kbd/same", self.same.isChecked())
-        s.setValue("kbd/speed", spd)
-        s.setValue("kbd/brightness", bri)
+    def saved(self):
+        s, d = self.win.settings, self.DEFAULTS
+        return {"effect": min(int(s.value("kbd/effect", d["effect"])), self.effect.count() - 1),
+                "areas": int_list(s.value("kbd/areas"), d["areas"]),
+                "same": as_bool(s.value("kbd/same", "false")),
+                "brightness": int(s.value("kbd/brightness", d["brightness"])),
+                "speed": int(s.value("kbd/speed", d["speed"]))}
+
+    def values(self):
+        return {"effect": self.effect.currentIndex(), "areas": [b.rgb for b in self.areas],
+                "same": self.same.isChecked(), "brightness": self.bright.value(),
+                "speed": self.speed.value()}
+
+    def _set(self, v):
+        self.effect.setCurrentIndex(v["effect"])
+        for b, rgb in zip(self.areas, v["areas"]):
+            b.set_rgb(rgb)
+        self.same.setChecked(v["same"])
+        self.bright.setValue(v["brightness"])
+        self.speed.setValue(v["speed"])
+        self.changed.emit()
+
+    def dirty(self):
+        return self.values() != self.saved()
+
+    def reset(self):
+        self._set(self.saved())
+
+    def defaults(self):
+        self._set(self.DEFAULTS)
+
+    def apply(self):
+        v = self.values()
+        for k, val in v.items():
+            self.win.settings.setValue(f"kbd/{k}", val)
+        eff = self.effect.currentData()
+        cols, spd, bri = v["areas"], v["speed"], v["brightness"]
         self.win.dev.run(lambda w: w.apply_keyboard(cols, eff, spd, bri),
                          lambda r: self.win.log("keyboard lighting applied"))
+        self.changed.emit()
 
-    def apply_bars(self):
+
+class AmbientLightsPage(Page):
+    title = "Ambient lights"
+    icon = ("settings-configure-symbolic", "configure")
+    has_apply = True
+
+    def __init__(self, win):
+        super().__init__()
+        self.win = win
+        s = win.settings
+        lay = QVBoxLayout(self)
+        self.left = BarEditor("Left light", miwmi.ZONE_BAR_LEFT, s, "left")
+        self.right = BarEditor("Right light", miwmi.ZONE_BAR_RIGHT, s, "right")
+        self.same_bars = QCheckBox("Right light same as left")
+        self.same_bars.toggled.connect(self.right.setDisabled)
+        self.same_bars.setChecked(self._saved_same())
+        self.right.setDisabled(self.same_bars.isChecked())
+        lay.addWidget(self.left)
+        lay.addWidget(self.same_bars)
+        lay.addWidget(self.right)
+        hint = QLabel("Defaults brings back the colour cycle the lights came with.")
+        hint.setStyleSheet("color: palette(placeholder-text);")
+        lay.addWidget(hint)
+        lay.addStretch()
+        for sig in (self.left.changed, self.right.changed, self.same_bars.toggled):
+            sig.connect(self.changed)
+
+    def _saved_same(self):
+        return as_bool(self.win.settings.value("bars/same", "true"))
+
+    def dirty(self):
+        return (self.left.values() != self.left.saved() or self.right.values() != self.right.saved()
+                or self.same_bars.isChecked() != self._saved_same())
+
+    def reset(self):
+        self.left.set_values(*self.left.saved())
+        self.right.set_values(*self.right.saved())
+        self.same_bars.setChecked(self._saved_same())
+
+    def defaults(self):
+        f = miwmi.BAR_FACTORY
+        for ed in (self.left, self.right):
+            ed.set_values(f["effect"], f["colours"], f["speed"], f["brightness"])
+        self.same_bars.setChecked(True)
+
+    def apply(self):
         self.win.settings.setValue("bars/same", self.same_bars.isChecked())
-        self.left.apply(self.win.dev)
-        if self.same_bars.isChecked():
-            cols, spd, bri = self.left.values()
-            self.win.dev.run(lambda w: w.apply_bar(self.right.zone, cols, spd, bri))
-        else:
-            self.right.apply(self.win.dev)
-        self.win.log("rear lighting applied")
-
-    def apply_all(self):
-        self.apply_keyboard()
-        self.apply_bars()
+        self.left.save()
+        self.right.save()
+        left = self.left.values()
+        right = left if self.same_bars.isChecked() else self.right.values()
+        for zone, (mode, cols, spd, bri) in ((self.left.zone, left), (self.right.zone, right)):
+            self.win.dev.run(lambda w, z=zone, m=mode, c=cols, sp=spd, b=bri:
+                             w.apply_bar(z, c, sp, b, m))
+        self.win.log("ambient lighting applied")
+        self.changed.emit()
 
 
-class AdvancedTab(QWidget):
+class AdvancedPage(Page):
+    title = "Advanced"
+    icon = ("utilities-terminal-symbolic", "utilities-terminal")
+
     def __init__(self, win):
         super().__init__()
         self.win = win
@@ -478,7 +930,7 @@ class AdvancedTab(QWidget):
         lay.addWidget(probe)
 
         self.swap = QCheckBox("Swap red/blue in colour commands (if colours come out wrong)")
-        self.swap.setChecked(win.settings.value("swap_rb", "false") == "true")
+        self.swap.setChecked(as_bool(win.settings.value("swap_rb", "false")))
         self.swap.toggled.connect(self._swap)
         lay.addWidget(self.swap)
 
@@ -556,20 +1008,74 @@ class MainWindow(QMainWindow):
         self.settings = QSettings("mi-gaming-box", "migamingbox")
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(make_icon())
-        self.resize(720, 620)
+        self.resize(1000, 720)
 
-        self.tabs = QTabWidget()
-        self.perf = PerformanceTab(self)
-        self.system = SystemTab(self)
-        self.lighting = LightingTab(self)
-        self.adv = AdvancedTab(self)
-        self.tabs.addTab(self.perf, "Performance")
-        self.tabs.addTab(self.system, "System")
-        self.tabs.addTab(self.lighting, "Lighting")
-        self.tabs.addTab(self.adv, "Advanced")
-        self.setCentralWidget(self.tabs)
-        self.tabs.setEnabled(False)
-        self.statusBar().showMessage("Waiting for authorization…")
+        self.dash = DashboardPage(self)
+        self.system = self.dash.switches
+        self.keyboard = KeyboardPage(self)
+        self.ambient = AmbientLightsPage(self)
+        self.adv = AdvancedPage(self)
+        self.sidebar = QListWidget()
+        self.sidebar.setFrameShape(QFrame.NoFrame)
+        self.sidebar.setIconSize(QSize(22, 22))
+        self.sidebar.setSpacing(0)
+        self.stack = QStackedWidget()
+        for page in (self.dash, self.keyboard, self.ambient, self.adv):
+            item = QListWidgetItem(theme_icon(*page.icon), page.title)
+            item.setSizeHint(QSize(0, 32))
+            item.setData(Qt.UserRole, self.stack.addWidget(page))
+            self.sidebar.addItem(item)
+            page.changed.connect(self._update_bar)
+        self.sidebar.currentItemChanged.connect(self._switch_page)
+
+
+        # KDE-style bottom bar: Defaults / Reset on the left, Apply on the right.
+        self.defaults_btn = QPushButton(theme_icon("edit-reset", "document-revert"), "Defaults")
+        self.reset_btn = QPushButton(theme_icon("edit-undo"), "Reset")
+        self.apply_btn = QPushButton(theme_icon("dialog-ok-apply", "dialog-ok"), "Apply")
+        self.defaults_btn.clicked.connect(lambda: self.current_page().defaults())
+        self.reset_btn.clicked.connect(lambda: self.current_page().reset())
+        self.apply_btn.clicked.connect(lambda: self.current_page().apply())
+        # Only the lighting pages have one; the others act the moment you click.
+        self.bottom = QWidget()
+        bar = QHBoxLayout(self.bottom)
+        bar.setContentsMargins(8, 6, 8, 6)
+        for w in (self.defaults_btn, self.reset_btn):
+            bar.addWidget(w)
+        bar.addStretch()
+        bar.addWidget(self.apply_btn)
+        self.bottom_line = hline()
+
+        right = QVBoxLayout()
+        right.setContentsMargins(0, 0, 0, 0)
+        right.setSpacing(0)
+        # Connection state and hardware errors go in the window title.
+        self.status_timer = QTimer(self, singleShot=True)
+        self.base_status = ""
+        self.status_timer.timeout.connect(lambda: self._title(self.base_status))
+        # Pages own their margins, so the Dashboard's scroll area can reach the edges.
+        for page in (self.keyboard, self.ambient, self.adv):
+            page.layout().setContentsMargins(*PAGE_MARGINS)
+        right.addWidget(self.stack, 1)
+        right.addWidget(self.bottom_line)
+        right.addWidget(self.bottom)
+
+        central = QWidget()
+        outer = QHBoxLayout(central)
+        # Breeze paints a separator along the top pixel row of the window; start the
+        # sidebar and pages one row lower so they don't paint over it.
+        outer.setContentsMargins(0, 1, 0, 0)
+        outer.setSpacing(0)
+        self.sidebar.setFixedWidth(220)
+        outer.addWidget(self.sidebar)
+        outer.addWidget(vline())
+        outer.addLayout(right, 1)
+        self.setCentralWidget(central)
+        self.stack.setEnabled(False)
+        self.show_status("Waiting for authorization…")
+
+        start = int(self.settings.value("page", 0))
+        self.sidebar.setCurrentRow(start if 0 <= start < self.sidebar.count() else 0)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_fan)
@@ -583,8 +1089,53 @@ class MainWindow(QMainWindow):
         self.dev.ready.connect(self._ready)
         self.dev.failed.connect(self._failed)
         self.dev.error.connect(lambda e: (self.log(f"error: {e}"),
-                                          self.statusBar().showMessage(f"Error: {e}", 5000)))
+                                          self.show_status(f"Error: {e}", 5000)))
         self.dev.start()
+
+    def _title(self, note):
+        self.setWindowTitle(f"{APP_NAME} — {note}" if note else APP_NAME)
+
+    def show_status(self, text, timeout=0):
+        """Note in the window title. timeout=0 sets the lasting note;
+        a timed one (errors) falls back to it."""
+        if not timeout:
+            self.base_status = text
+        self._title(text)
+        self.status_timer.stop()
+        if timeout:
+            self.status_timer.start(timeout)
+
+    def current_page(self):
+        return self.stack.currentWidget()
+
+    def _switch_page(self, item, prev):
+        if item is None or item.data(Qt.UserRole) is None:
+            return
+        page = self.current_page()
+        if page is not None and page.dirty() and prev is not None:
+            ans = QMessageBox.question(
+                self, APP_NAME, f"Apply the changes to {page.title}?",
+                QMessageBox.Apply | QMessageBox.Discard | QMessageBox.Cancel, QMessageBox.Apply)
+            if ans == QMessageBox.Cancel:
+                self.sidebar.blockSignals(True)
+                self.sidebar.setCurrentItem(prev)
+                self.sidebar.blockSignals(False)
+                return
+            page.apply() if ans == QMessageBox.Apply else page.reset()
+        self.stack.setCurrentIndex(item.data(Qt.UserRole))
+        self.settings.setValue("page", self.sidebar.row(item))
+        self._update_bar()
+
+    def _update_bar(self):
+        page = self.current_page()
+        if page is None:
+            return
+        dirty = page.has_apply and page.dirty()
+        self.defaults_btn.setEnabled(page.has_apply)
+        self.reset_btn.setEnabled(dirty)
+        self.apply_btn.setEnabled(dirty)
+        self.bottom.setVisible(page.has_apply)
+        self.bottom_line.setVisible(page.has_apply)
 
     TRAY_SWITCHES = {"kbbl": "Keyboard backlight", "touchpad": "Touchpad",
                      "fnlock": "Fn lock", "winlock": "Windows key"}
@@ -601,8 +1152,8 @@ class MainWindow(QMainWindow):
         self.tray = QSystemTrayIcon(tray_icon(), self)
         self.tray.setToolTip(APP_NAME)
         menu = QMenu()
-        self.tray_turbo = QAction("Turbo", menu, checkable=True)
-        self.tray_turbo.triggered.connect(lambda on: self.perf._toggle(on))
+        self.tray_turbo = QAction("Turbo mode", menu, checkable=True)
+        self.tray_turbo.triggered.connect(lambda on: self.dash._toggle(on))
         menu.addAction(self.tray_turbo)
         menu.addSeparator()
         self.tray_switches = {}
@@ -625,19 +1176,20 @@ class MainWindow(QMainWindow):
         self.tray.show()
 
     def _ready(self, desc):
-        self.tabs.setEnabled(True)
-        self.statusBar().showMessage(f"Connected: {desc}")
+        self.stack.setEnabled(True)
+        self.show_status("Demo mode (no hardware)" if desc.startswith("demo") else "")
         self.log(f"backend: {desc}")
-        swap = self.settings.value("swap_rb", "false") == "true"
+        swap = as_bool(self.settings.value("swap_rb", "false"))
         self.dev.run(lambda w: setattr(w, "swap_rb", swap))
         self.refresh_fan()
         self.system.refresh()
         self.timer.start(POLL_MS)
-        if self.settings.value("apply_on_start", "false") == "true":
-            self.lighting.apply_all()
+        if as_bool(self.settings.value("apply_on_start", "false")):
+            self.keyboard.apply()
+            self.ambient.apply()
 
     def _failed(self, err):
-        self.statusBar().showMessage("Not connected")
+        self.show_status("Not connected")
         box = QMessageBox(QMessageBox.Warning, APP_NAME,
                           f"Could not access the hardware:\n\n{err}\n\n"
                           "Make sure acpi_call is installed (acpi_call-dkms) and you "
@@ -652,7 +1204,7 @@ class MainWindow(QMainWindow):
 
     def refresh_fan(self):
         def done(r):
-            self.perf.update_fan(r)
+            self.dash.update_fan(r)
             if self.tray and status_ok(r):
                 on = bool(r.value)
                 self.tray_turbo.setChecked(on)
