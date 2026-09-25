@@ -692,54 +692,20 @@ class DashboardPage(Page):
             self.net_form.set(iface, addr, f"IP ({iface})")
 
 
-class SettingsPage(Page):
-    """Hardware switches plus the app's own start-up options. Acts immediately."""
-    title = "Settings"
-    icon = ("systemsettings", "preferences-system")
-    LABELS = {
-        "fnlock": "Fn lock (F-keys act as media keys)",
-        "winlock": "Windows key enabled",
-        "touchpad": "Touchpad enabled",
-    }
+class GpuPage(Page):
+    """The NVIDIA GPU on/off, now and at startup (see gpu.py). Acts immediately."""
+    title = "GPU"
+    icon = ("preferences-devices-cpu", "cpu")
 
     def __init__(self, win):
         super().__init__()
         self.win = win
         lay = QVBoxLayout(self)
-        hw = QGroupBox("Keyboard && touchpad")
-        bl = QVBoxLayout(hw)
-        bl.setSpacing(10)
-        self.checks = {}
-        for key, text in self.LABELS.items():
-            cb = QCheckBox(text)
-            cb.clicked.connect(lambda on, k=key: self._set(k, on))
-            bl.addWidget(cb)
-            self.checks[key] = cb
-        # KBBL lives in its own WMI function (0x0400), not the 0x0300 switch set.
-        self.kbbl = QCheckBox("Keyboard backlight")
-        self.kbbl.clicked.connect(self._set_kb)
-        bl.addWidget(self.kbbl)
-        lay.addWidget(hw)
-
-        app = QGroupBox("App")
-        al = QVBoxLayout(app)
-        al.setSpacing(10)
-        self.login = QCheckBox("Start at login (in the tray)")
-        self.login.setChecked(os.path.exists(AUTOSTART))
-        self.login.toggled.connect(self._set_autostart)
-        al.addWidget(self.login)
-        self.on_start = QCheckBox("Re-apply lighting when the app starts")
-        self.on_start.setChecked(as_bool(win.settings.value("apply_on_start", "false")))
-        self.on_start.toggled.connect(lambda on: win.settings.setValue("apply_on_start", on))
-        al.addWidget(self.on_start)
-        lay.addWidget(app)
-
-        # --- NVIDIA GPU on/off (see gpu.py)
-        gfx = QGroupBox("Graphics")
+        gfx = QGroupBox("NVIDIA GPU")
         gl = QVBoxLayout(gfx)
         gl.setSpacing(10)
         row = QHBoxLayout()
-        self.gpu_label = QLabel("NVIDIA GPU: –")
+        self.gpu_label = QLabel("Status: –")
         self.gpu_btn = QPushButton("Turn on")
         self.gpu_btn.clicked.connect(lambda: self.gpu_set(not self.gpu_on))
         row.addWidget(self.gpu_label, 1)
@@ -749,7 +715,10 @@ class SettingsPage(Page):
         self.gpu_hint.setWordWrap(True)
         self.gpu_hint.setStyleSheet("color: palette(placeholder-text);")
         gl.addWidget(self.gpu_hint)
-        gl.addWidget(QLabel("At startup:"))
+        lay.addWidget(gfx)
+        boot = QGroupBox("At startup")
+        gl = QVBoxLayout(boot)
+        gl.setSpacing(10)
         self.start_off = QRadioButton("GPU off (integrated graphics). Longest battery life, "
                                       "but no HDMI output until you turn the GPU on.")
         self.start_on = QRadioButton("GPU on (hybrid). The NVIDIA GPU and the HDMI port are "
@@ -757,12 +726,15 @@ class SettingsPage(Page):
         for rb, mode in ((self.start_off, "integrated"), (self.start_on, "hybrid")):
             rb.toggled.connect(lambda on, m=mode: on and self._gpu_startup(m))
             gl.addWidget(rb)
-        lay.addWidget(gfx)
+        lay.addWidget(boot)
         lay.addStretch()
         self.gpu_on = None
         self.gpu_mode = None
 
-    # --- NVIDIA GPU ----------------------------------------------------------
+    def showEvent(self, e):
+        self.refresh_gpu()
+        super().showEvent(e)
+
     def refresh_gpu(self):
         self.win.dev.run(lambda w: w.gpu("status"), self._gpu_update)
 
@@ -770,13 +742,13 @@ class SettingsPage(Page):
         self.gpu_on = st["present"]
         self.gpu_mode = st["mode"]
         if self.gpu_on:
-            self.gpu_label.setText("NVIDIA GPU: <b>on</b>")
+            self.gpu_label.setText("Status: <b>on</b>")
             self.gpu_btn.setText("Turn off")
             self.gpu_hint.setText("Games can use it: right-click a game or app → “Run using "
                                   "dedicated graphics card”, or start it with prime-run. "
                                   "It uses about 5 W even when idle.")
         else:
-            self.gpu_label.setText("NVIDIA GPU: <b>off</b> (saving power)")
+            self.gpu_label.setText("Status: <b>off</b> (saving power)")
             self.gpu_btn.setText("Turn on")
             self.gpu_hint.setText("Turn it on before starting a game. The HDMI port only "
                                   "works while it's on.")
@@ -828,6 +800,51 @@ class SettingsPage(Page):
         self.win.log(f"GPU at startup: {'off' if mode == 'integrated' else 'on'}")
         self.win.dev.run(lambda w: w.gpu(f"startup-{mode}"), self._gpu_update)
 
+
+class SettingsPage(Page):
+    """Hardware switches plus the app's own start-up options. Acts immediately."""
+    title = "Settings"
+    icon = ("systemsettings", "preferences-system")
+    LABELS = {
+        "fnlock": "Fn lock (F-keys act as media keys)",
+        "winlock": "Windows key enabled",
+        "touchpad": "Touchpad enabled",
+    }
+
+    def __init__(self, win):
+        super().__init__()
+        self.win = win
+        lay = QVBoxLayout(self)
+        hw = QGroupBox("Keyboard && touchpad")
+        bl = QVBoxLayout(hw)
+        bl.setSpacing(10)
+        self.checks = {}
+        for key, text in self.LABELS.items():
+            cb = QCheckBox(text)
+            cb.clicked.connect(lambda on, k=key: self._set(k, on))
+            bl.addWidget(cb)
+            self.checks[key] = cb
+        # KBBL lives in its own WMI function (0x0400), not the 0x0300 switch set.
+        self.kbbl = QCheckBox("Keyboard backlight")
+        self.kbbl.clicked.connect(self._set_kb)
+        bl.addWidget(self.kbbl)
+        lay.addWidget(hw)
+
+        app = QGroupBox("App")
+        al = QVBoxLayout(app)
+        al.setSpacing(10)
+        self.login = QCheckBox("Start at login (in the tray)")
+        self.login.setChecked(os.path.exists(AUTOSTART))
+        self.login.toggled.connect(self._set_autostart)
+        al.addWidget(self.login)
+        self.on_start = QCheckBox("Re-apply lighting when the app starts")
+        self.on_start.setChecked(as_bool(win.settings.value("apply_on_start", "false")))
+        self.on_start.toggled.connect(lambda on: win.settings.setValue("apply_on_start", on))
+        al.addWidget(self.on_start)
+        lay.addWidget(app)
+
+        lay.addStretch()
+
     def _set_autostart(self, on):
         try:
             if on:
@@ -849,8 +866,6 @@ class SettingsPage(Page):
         self.win.dev.run(lambda w: w.set_kbd_backlight(on), lambda r: self.refresh())
 
     def refresh(self):
-        self.refresh_gpu()
-
         def read(w):
             return {k: w.get_switch(k) for k in self.LABELS}, w.get_kbd_backlight()
 
@@ -1755,6 +1770,7 @@ class MainWindow(QMainWindow):
         self.resize(1000, 720)
 
         self.dash = DashboardPage(self)
+        self.gpu_page = GpuPage(self)
         self.settings_page = SettingsPage(self)
         self.system = self.settings_page
         self.keyboard = KeyboardPage(self)
@@ -1766,8 +1782,8 @@ class MainWindow(QMainWindow):
         self.sidebar.setIconSize(QSize(22, 22))
         self.sidebar.setSpacing(0)
         self.stack = QStackedWidget()
-        for page in (self.dash, self.settings_page, self.keyboard, self.ambient, self.macros,
-                     self.log_page):
+        for page in (self.dash, self.gpu_page, self.keyboard, self.ambient, self.macros,
+                     self.settings_page, self.log_page):
             item = QListWidgetItem(theme_icon(*page.icon), page.title)
             item.setSizeHint(QSize(0, 32))
             item.setData(Qt.UserRole, self.stack.addWidget(page))
@@ -1801,7 +1817,7 @@ class MainWindow(QMainWindow):
         self.base_status = ""
         self.status_timer.timeout.connect(lambda: self._title(self.base_status))
         # Pages own their margins, so the Dashboard's scroll area can reach the edges.
-        for page in (self.keyboard, self.ambient, self.settings_page, self.macros):
+        for page in (self.gpu_page, self.keyboard, self.ambient, self.settings_page, self.macros):
             page.layout().setContentsMargins(*PAGE_MARGINS)
         right.addWidget(self.stack, 1)
         right.addWidget(self.bottom_line)
@@ -1931,7 +1947,7 @@ class MainWindow(QMainWindow):
         self.tray_turbo.triggered.connect(lambda on: self.dash._toggle(on))
         menu.addAction(self.tray_turbo)
         self.tray_gpu = QAction("NVIDIA GPU", menu, checkable=True)
-        self.tray_gpu.triggered.connect(lambda on: self.system.gpu_set(on))
+        self.tray_gpu.triggered.connect(lambda on: self.gpu_page.gpu_set(on))
         menu.addAction(self.tray_gpu)
         self.tray_saver = QAction("Battery saver", menu, checkable=True)
         self.tray_saver.triggered.connect(self.set_powersave)
@@ -1947,6 +1963,7 @@ class MainWindow(QMainWindow):
             menu.addAction(act)
             self.tray_switches[key] = act
         menu.aboutToShow.connect(self.system.refresh)
+        menu.aboutToShow.connect(self.gpu_page.refresh_gpu)
         menu.aboutToShow.connect(self.refresh_powersave)
         menu.aboutToShow.connect(self.refresh_fan)
         menu.addSeparator()
@@ -1964,6 +1981,7 @@ class MainWindow(QMainWindow):
         self.log(f"backend: {desc}")
         self.refresh_fan()
         self.system.refresh()
+        self.gpu_page.refresh_gpu()
         self.refresh_powersave()
         self.connected = True
         if self.isVisible():

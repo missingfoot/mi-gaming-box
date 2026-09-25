@@ -55,17 +55,9 @@ Power saver (the CPU clocks up less eagerly) and back to Balanced when you turn 
 devices are left alone (autosuspend can delay the first keypress or mouse move). Turning it
 off puts every setting back as it was; a restart turns it off too.
 
-### Settings
+### GPU
 
-![Settings: keyboard and touchpad switches, start at login, graphics](docs/screenshots/settings.png)
-
-The laptop's own switches: **Fn lock**, the **Windows key**, the **touchpad** and the
-**keyboard backlight**. They also sit in the tray menu. **Start at login** puts the app
-in the tray when you log in, and **Re-apply lighting** restores your colours after a
-reboot. The keyboard's lighting chip forgets them at shutdown, and GamingBox on Windows
-fixes this the same way.
-
-**Graphics** can switch the NVIDIA GPU off for much better battery life. This GTX 1060
+Switch the NVIDIA GPU off for much better battery life. This GTX 1060
 is too old to power itself down, so it otherwise idles at around 5 W. Choose whether the
 laptop **starts with the GPU off** (integrated graphics) or on (hybrid), and **turn it on**
 whenever you need it for a game, with no restart. It's also in the tray menu. Turning it
@@ -73,6 +65,16 @@ off happens straight away if nothing is using it, otherwise at the next restart.
 HDMI port is wired to the NVIDIA GPU, so it only works while the GPU is on. If a boot
 ever goes wrong, add `mi_gaming_box.gpu=hybrid` to the kernel command line in your boot
 menu to start with the GPU on.
+
+### Settings
+
+![Settings: keyboard and touchpad switches, start at login](docs/screenshots/settings.png)
+
+The laptop's own switches: **Fn lock**, the **Windows key**, the **touchpad** and the
+**keyboard backlight**. They also sit in the tray menu. **Start at login** puts the app
+in the tray when you log in, and **Re-apply lighting** restores your colours after a
+reboot. The keyboard's lighting chip forgets them at shutdown, and GamingBox on Windows
+fixes this the same way.
 
 ### Keyboard lighting
 
