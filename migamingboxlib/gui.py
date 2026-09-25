@@ -85,26 +85,56 @@ class Device(QObject):
 # --------------------------------------------------------------------------
 # Small widgets
 
-class ColourButton(QPushButton):
+# Plain colours are what people want on a 4-area keyboard; the picker is under "Custom…".
+PRESET_COLOURS = [("Red", 0xFF0000), ("Orange", 0xFF8000), ("Yellow", 0xFFFF00),
+                  ("Green", 0x00FF00), ("Cyan", 0x00FFFF), ("Blue", 0x0000FF),
+                  ("Purple", 0x8000FF), ("Magenta", 0xFF00FF), ("Pink", 0xFF4080),
+                  ("White", 0xFFFFFF)]
+
+
+def swatch(rgb):
+    pm = QPixmap(16, 16)
+    pm.fill(QColor(f"#{rgb:06x}"))
+    p = QPainter(pm)
+    p.setPen(QColor("#808080"))
+    p.drawRect(0, 0, 15, 15)
+    p.end()
+    return QIcon(pm)
+
+
+class ColourCombo(QComboBox):
+    """Drop-down of named colours plus "Custom…" (opens the colour picker)."""
     changed = Signal(int)
 
     def __init__(self, rgb=0xFFFFFF, parent=None):
         super().__init__(parent)
-        self.setFixedSize(44, 28)
+        for name, val in PRESET_COLOURS:
+            self.addItem(swatch(val), name, val)
+        self.addItem("Custom…", None)
         self.set_rgb(rgb)
-        self.clicked.connect(self._pick)
+        self.activated.connect(self._chosen)
 
     def set_rgb(self, rgb):
         self.rgb = rgb & 0xFFFFFF
-        self.setStyleSheet(f"background-color: #{self.rgb:06x}; border: 1px solid palette(mid);"
-                           "border-radius: 4px;")
-        self.setToolTip(f"#{self.rgb:06X}")
+        i = self.findData(self.rgb)
+        if i < 0:  # a custom colour gets its own entry just above "Custom…"
+            n = len(PRESET_COLOURS)
+            if self.itemData(n) is not None:
+                self.removeItem(n)
+            self.insertItem(n, swatch(self.rgb), f"#{self.rgb:06X}", self.rgb)
+            i = n
+        self.setCurrentIndex(i)
 
-    def _pick(self):
-        c = QColorDialog.getColor(QColor(f"#{self.rgb:06x}"), self, "Pick colour")
-        if c.isValid():
-            self.set_rgb(c.rgb())
-            self.changed.emit(self.rgb)
+    def _chosen(self, i):
+        val = self.itemData(i)
+        if val is None:
+            c = QColorDialog.getColor(QColor(f"#{self.rgb:06x}"), self, "Pick colour")
+            if not c.isValid():
+                self.set_rgb(self.rgb)
+                return
+            val = c.rgb()
+        self.set_rgb(val)
+        self.changed.emit(self.rgb)
 
 
 def slider(lo, hi, val):
@@ -279,7 +309,7 @@ class BarEditor(QGroupBox):
     def _add(self, rgb):
         if len(self.buttons) >= miwmi.MAX_COLOURS:
             return
-        b = ColourButton(rgb)
+        b = ColourCombo(rgb)
         self.buttons.append(b)
         self.colours_row.addWidget(b)
         self._sync()
@@ -326,11 +356,11 @@ class LightingTab(QWidget):
         areas = QWidget()
         al = QHBoxLayout(areas)
         al.setContentsMargins(0, 0, 0, 0)
-        saved = int_list(s.value("kbd/areas"), [0xFF0000, 0x00A0FF, 0x00FF14, 0xFFA000])
+        saved = int_list(s.value("kbd/areas"), [0xFF0000, 0x0000FF, 0x00FF00, 0xFF8000])
         self.areas = []
         for i, name in enumerate("ABCD"):
             al.addWidget(QLabel(name))
-            b = ColourButton(saved[i])
+            b = ColourCombo(saved[i])
             b.changed.connect(lambda rgb, i=i: self._area_changed(i, rgb))
             self.areas.append(b)
             al.addWidget(b)
@@ -441,7 +471,7 @@ class AdvancedTab(QWidget):
         self.p_zone.setValue(1)
         self.p_eff = QSpinBox()
         self.p_eff.setRange(0, 255)
-        self.p_colour = ColourButton(0xFF0000)
+        self.p_colour = ColourCombo(0xFF0000)
         go = QPushButton("Light it")
         go.clicked.connect(self._probe)
         for w in (QLabel("LEDZ"), self.p_zone, QLabel("effect"), self.p_eff, self.p_colour, go):
