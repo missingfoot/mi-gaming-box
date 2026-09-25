@@ -18,7 +18,7 @@ GUI_PAT = [/ ]migamingbox$$
 
 # Quit any running GUI (it's single-instance, so it would swallow the new launch).
 define quit_gui
-	-pkill -u "$$USER" -f '$(GUI_PAT)'
+	@pkill -u "$$USER" -f '$(GUI_PAT)' || true
 	@for i in 1 2 3 4 5 6 7 8 9 10; do pgrep -u "$$USER" -f '$(GUI_PAT)' >/dev/null || break; sleep 0.3; done
 endef
 

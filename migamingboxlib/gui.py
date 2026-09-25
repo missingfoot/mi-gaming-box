@@ -224,7 +224,6 @@ class SystemTab(QWidget):
         "fnlock": "Fn lock (F-keys act as media keys)",
         "winlock": "Windows key enabled",
         "touchpad": "Touchpad enabled",
-        "powerled": "Power button LED",
     }
 
     def __init__(self, win):
@@ -588,7 +587,7 @@ class MainWindow(QMainWindow):
         self.dev.start()
 
     TRAY_SWITCHES = {"kbbl": "Keyboard backlight", "touchpad": "Touchpad",
-                     "fnlock": "Fn lock", "winlock": "Windows key", "powerled": "Power LED"}
+                     "fnlock": "Fn lock", "winlock": "Windows key"}
 
     def sync_tray_switches(self, states):
         for k, on in states.items():
