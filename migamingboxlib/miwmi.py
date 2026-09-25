@@ -45,6 +45,15 @@ MISC = {"touchpad": 0, "fnlock": 1, "winlock": 2, "powerled": 4}
 ZONE_BAR_LEFT, ZONE_BAR_RIGHT = 1, 2
 ZONE_KEYBOARD = (4, 5, 6, 7)
 EFFECTS = {"Static": 0, "Breath": 1, "Wave": 2, "Colorful": 3}
+# Keyboard LEBR is inverted: 0 = brightest, 4 = dimmest, 5 = off (verified on a TM1801).
+# The API takes a level 0 (off) .. 5 (brightest), like the Fn brightness key's six states.
+KBD_BRIGHTNESS_MAX = 5
+# Keyboard effect = the final LETY sent after the per-area commits (only when > 1).
+# Seen on a TM1801: 2 = each area breathes in its own colour, 3 = similar breathing
+# (maybe a wave, hard to tell), 4 = whole keyboard pulses in the LAST area's colour,
+# 5 = no visible animation.
+KBD_EFFECTS = {"Static": 0, "Breath": 2, "Breath (alt)": 3, "Pulse (area D colour)": 4}
+KBD_SPEED_MAX = 4  # LSPD 0 = slowest .. 4 = fastest (5 looked slower again)
 MAX_COLOURS = 8  # EC colour slots C0..C7
 
 
@@ -97,43 +106,61 @@ class MiWmi:
         return self.transact(WRITE, F_KBD_BACKLIGHT, int(not on), kbit & 0xFFFF)
 
     # --- lighting -------------------------------------------------------
-    # FB00 0100: arg0 -> LEDZ, arg1 bytes -> LETY (effect), LSPD (speed), LEBR (brightness)
-    # FB00 0101: arg0 bytes -> slot (1-8), LCAM (colour count); arg1 bytes -> colour
+    # FB00 0100: arg0 -> LEDZ, arg1 bytes -> LETY, LSPD (speed), LEBR (brightness)
+    # FB00 0101: arg0 bytes -> slot (1-8), LCAM (colour count), group; arg1 bytes -> R, G, B
+    #
+    # LETY is not just "the effect". GamingBox (keyboard routine at 0x41b7e0) sends
+    #   LETY 0 on zone 4, then per zone: colours + LETY 1 (commit), then LETY=mode only
+    #   when mode > 1.
+    # A bare LETY 0 without the LETY 1 commit blacks the keyboard out until a power
+    # cycle or a proper commit + brightness key (verified on a TM1801, 2026-09-25).
+    LETY_BEGIN, LETY_COMMIT = 0, 1
     swap_rb = False
 
-    def write_effect(self, zone, effect, speed, brightness):
-        arg1 = (effect & 0xFF) | ((speed & 0xFF) << 8) | ((brightness & 0xFF) << 16)
+    def write_effect(self, zone, lety, speed, brightness):
+        arg1 = (lety & 0xFF) | ((speed & 0xFF) << 8) | ((brightness & 0xFF) << 16)
         return self.transact(WRITE, F_LIGHT_EFFECT, zone, arg1)
 
-    def write_colours(self, colours):
+    def write_colours(self, colours, group=0):
+        """group 0 = keyboard, 1 = light bars (as GamingBox sends it; the DSDT ignores it)."""
         colours = list(colours)[:MAX_COLOURS]
         replies = []
         for slot, rgb in enumerate(colours, 1):
             r, g, b = (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF
             if self.swap_rb:
                 r, b = b, r
-            # GamingBox packs 0x00RRGGBB little-endian: byte8=B, byte9=G, byte10=R
-            replies.append(self.transact(WRITE, F_LIGHT_COLOUR, slot | (len(colours) << 8),
-                                         (r << 16) | (g << 8) | b))
+            # byte8 -> CxZR, byte9 -> CxZG, byte10 -> CxZB (red in ZR verified by eye)
+            replies.append(self.transact(WRITE, F_LIGHT_COLOUR,
+                                         slot | (len(colours) << 8) | (group << 16),
+                                         r | (g << 8) | (b << 16)))
         return replies
 
     def apply_bar(self, zone, colours, speed, brightness, effect=None):
-        """Mirrors GamingBox: static first, colours, then the real effect.
-        With several colours the app uses effect 3 (cycle)."""
+        """UNTESTED on hardware. Follows GamingBox's per-zone pattern: begin, colours,
+        commit, then the effect if it's an animated one."""
         if effect is None:
             effect = EFFECTS["Colorful"] if len(colours) > 1 else EFFECTS["Static"]
-        self.write_effect(zone, 0, speed, brightness)
-        self.write_colours(colours if effect == EFFECTS["Colorful"] else colours[:1])
-        return self.write_effect(zone, effect, speed, brightness)
+        self.write_effect(zone, self.LETY_BEGIN, speed, brightness)
+        self.write_colours(colours if effect == EFFECTS["Colorful"] else colours[:1], group=1)
+        r = self.write_effect(zone, self.LETY_COMMIT, speed, brightness)
+        if effect > 1:
+            r = self.write_effect(zone, effect, speed, brightness)
+        return r
 
     def apply_keyboard(self, area_colours, effect, speed, brightness):
-        """area_colours: 4 RGB ints for areas A-D. Sequence mirrors GamingBox."""
-        self.write_effect(ZONE_KEYBOARD[0], 0, speed, brightness)
-        self.write_colours(area_colours)
+        """area_colours: 4 RGB ints for areas A-D (LEDZ 4-7, left to right).
+        brightness: 0 (off) .. 5 (brightest). Static is verified; effect values > 1 are
+        sent the way GamingBox does it (seen so far: 2/3 colour cycle, 4 breath)."""
+        level = max(0, min(KBD_BRIGHTNESS_MAX, int(brightness)))
+        brightness = KBD_BRIGHTNESS_MAX - level  # raw LEBR
+        self.write_effect(ZONE_KEYBOARD[0], self.LETY_BEGIN, speed, brightness)
+        r = None
         for zone, rgb in zip(ZONE_KEYBOARD, area_colours):
-            self.write_effect(zone, 1, speed, brightness)
             self.write_colours([rgb])
-        return self.write_effect(ZONE_KEYBOARD[0], effect, speed, brightness)
+            r = self.write_effect(zone, self.LETY_COMMIT, speed, brightness)
+        if effect > 1:
+            r = self.write_effect(ZONE_KEYBOARD[0], effect, speed, brightness)
+        return r
 
 
 def check_hardware():

@@ -19,8 +19,8 @@ interface was worked out is documented in [FINDINGS.md](FINDINGS.md).
 | CPU / GPU temperature, both fan speeds | ✅ tested |
 | 5 macro keys → F13–F17, bindable in your desktop's shortcut settings | ✅ tested |
 | Fn lock, Windows key, touchpad, power-button LED | ✅ reading tested, switching expected to work |
-| Keyboard backlight on/off | ✅ tested |
-| Keyboard RGB (4 areas; Static / Breath / Wave / Colorful) | 🧪 implemented, needs testers |
+| Keyboard backlight on/off (via WMI) | ❌ the EC bit has no visible effect; use the brightness key or the Lighting tab's brightness |
+| Keyboard RGB (4 areas, brightness 0–5, speed, Static / Breath effects) | ✅ tested (`tools/kbdtest`) |
 | Rear light bars (left / right, colour cycle) | 🧪 implemented, needs testers |
 
 Only tested on **TM1801** (`cat /sys/class/dmi/id/product_name`). On any other

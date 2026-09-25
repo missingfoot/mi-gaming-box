@@ -318,9 +318,9 @@ class LightingTab(QWidget):
         kb = QGroupBox("Keyboard")
         kl = QFormLayout(kb)
         self.effect = QComboBox()
-        for name, val in miwmi.EFFECTS.items():
+        for name, val in miwmi.KBD_EFFECTS.items():
             self.effect.addItem(name, val)
-        self.effect.setCurrentIndex(int(s.value("kbd/effect", 0)))
+        self.effect.setCurrentIndex(min(int(s.value("kbd/effect", 0)), self.effect.count() - 1))
         kl.addRow("Effect", self.effect)
 
         areas = QWidget()
@@ -341,7 +341,7 @@ class LightingTab(QWidget):
         self.same.toggled.connect(lambda on: on and self._area_changed(0, self.areas[0].rgb))
         kl.addRow(self.same)
         self.kb_bright = slider(0, 5, int(s.value("kbd/brightness", 5)))
-        self.kb_speed = slider(0, 5, int(s.value("kbd/speed", 2)))
+        self.kb_speed = slider(0, miwmi.KBD_SPEED_MAX, int(s.value("kbd/speed", 2)))
         kl.addRow("Brightness", self.kb_bright)
         kl.addRow("Speed", self.kb_speed)
         kb_apply = QPushButton("Apply keyboard")
@@ -485,9 +485,11 @@ class AdvancedTab(QWidget):
         self.win.log(f"probe LEDZ={zone} effect={eff} colour=#{rgb:06X}")
 
         def fn(w):
-            w.write_effect(zone, 0, 2, 5)
+            # begin -> colour -> commit; a bare LETY 0 blacks the keyboard out
+            w.write_effect(zone, w.LETY_BEGIN, 2, 5)
             w.write_colours([rgb])
-            return w.write_effect(zone, eff, 2, 5)
+            r = w.write_effect(zone, w.LETY_COMMIT, 2, 5)
+            return w.write_effect(zone, eff, 2, 5) if eff > 1 else r
         self.win.dev.run(fn, lambda r: self.win.log(f"  status={r.status:#06x}"))
 
     def log(self, text):

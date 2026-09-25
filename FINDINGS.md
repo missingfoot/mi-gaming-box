@@ -106,8 +106,34 @@ UI effect names: Static, Breath, Wave, Colorful (→ LETY 0–3).
 Colour byte order: GamingBox sends 0x00RRGGBB little-endian (byte8=B), although the EC
 field names suggest byte8=R. Verify by eye.
 
+## Keyboard lighting: verified on hardware (2026-09-25, `tools/kbdtest`)
+
+- **The real sequence** (GamingBox.exe keyboard routine at 0x41b7e0, per-zone helper at 0x41c930):
+  `effect(zone 4, LETY=0)`, then for each area: colours + `effect(zone, LETY=1)`,
+  then `effect(zone 4, LETY=mode)` **only if mode > 1**. LETY 1 is a commit, not "Breath".
+- **A bare LETY=0 write blacks the keyboard out**, and later writes and the brightness key
+  don't bring it back. It recovers with a full begin → colour → commit sequence followed by
+  a brightness-key press (or a power cycle). This is what "broke" the keyboard before.
+- Zones 4, 5, 6, 7 = areas A–D, **left to right**.
+- **Colour bytes: byte8 → CxZR is red** (the EC names are right; there's no R/B swap).
+- The EC clears LEDZ inside the WSAA's own 60 ms sleep, so writes don't need extra pacing.
+- **KBBL (FB00 0400) has no visible effect.** Six on/off toggles changed nothing.
+- **Keyboard LEBR is inverted: 0 = brightest, 4 = dimmest, 5 = off.** Every apply at
+  "brightness 5" switched the light off, and that was the whole "goes dark" mystery.
+  The driver now takes level 0 (off)–5 (brightest) and sends LEBR = 5 − level.
+- Final LETY after the commits (areas blue/green/white/red, full brightness): 2 = each area
+  breathes in its own colour, 3 = similar breathing (maybe a wave), 4 = the whole keyboard
+  pulses in the **last area's** colour (red), 5 = no visible animation.
+- LSPD for the keyboard: 0 = slowest … 4 = fastest (5 looked slower again).
+- Stress: 20 `apply_keyboard` calls back to back (180 writes) ended lit with the right colours.
+- KBBR is the live brightness (the Fn key cycles 5→4→3→2→1→0→5). An effect write copies LEBR into KBBR.
+- EC lighting registers survive a shutdown. What a shutdown resets is the ITE chip.
+- The ITE chip's HID feature report 0x5A reads `00 ff…` while lit (not informative yet).
+
 ## Still to confirm
-- LEDZ values for the rear light bars, and whether colours need an R/B swap (use the GUI's Advanced → Zone probe).
+- Which LETY value (>1) is Breath / Wave / Colorful on the keyboard (`kbdtest run effects`).
+- What mode 3 is exactly (wave?), and GamingBox's UI-effect → mode mapping.
+- LEDZ values for the rear light bars (GamingBox uses colour group 1 and zone 3 for "both bars").
 - Meaning of ARPL, ATFN and KBIT (KBIT: writing various values had no visible effect on the backlight).
 
 ## Macro keys (the 5 extra keys)

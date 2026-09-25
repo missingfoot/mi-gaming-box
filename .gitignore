@@ -9,3 +9,6 @@ __pycache__/
 游戏盒子.zip
 acpi/
 *.bmof
+
+# Local hardware test logs (tools/kbdtest)
+testlogs/

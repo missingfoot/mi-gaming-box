@@ -1,0 +1,392 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 James Sparkes
+"""kbdtest: interactive, logged test cycles for the keyboard lighting (run as root).
+
+Every step sends one or a few WMI writes, then takes a read-only EC snapshot, times
+how long the EC takes to clear LEDZ (it looks like a command mailbox), checks that
+the ITE 048d:8910 keyboard chip is still on USB, and asks you what the keyboard
+looks like. Everything goes to testlogs/kbdtest-<time>.jsonl.
+
+Quit the GUI and stop mikeysd first so nothing else touches acpi_call:
+    sudo systemctl stop mikeysd
+
+    sudo tools/kbdtest snap                    # read-only snapshot (do this first!)
+    sudo tools/kbdtest watch [secs]            # snapshots every 0.5 s, logs changes (try the Fn brightness key)
+    sudo tools/kbdtest run PLAN [--cycles N] [--delay S] [--wait]
+    sudo tools/kbdtest restore                 # replay the known-good sequence (see below)
+    sudo tools/kbdtest hid [note]              # read-only: ITE chip feature report 0x5A
+    sudo tools/kbdtest usbcycle [secs]         # power-cycle the ITE chip's USB port (soft reset test)
+
+Plans (the old bare-LETY-0 plans were removed: that write blacks the keyboard out):
+    backlight   toggle KBBL off/on (no visible effect on a TM1801)
+    commit      zone 4 white via begin -> colour -> commit
+    gbstatic    all 4 areas R/G/B/white, raw writes (the known-good recovery sequence)
+    driver      MiWmi.apply_keyboard through 5 palettes, cycled
+    stress      apply_keyboard many times back to back, then one check
+    bright      apply_keyboard white at levels 5..0, then 5 (0 = off)
+    effects     final LETY 2..5, areas blue/green/white/red; describe what you see
+    speed       mode 2 at speeds 0..5
+
+--delay S   pause between individual writes inside a step (default 0)
+--wait      after each effect write, poll until the EC clears LEDZ before going on
+"""
+import argparse
+import glob
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+from migamingboxlib.miwmi import AcpiCallWmi, WRITE, F_LIGHT_EFFECT, F_LIGHT_COLOUR  # noqa: E402
+
+LOGDIR = REPO / "testlogs"
+FIELDS = (["LEDZ", "LETY", "LSPD", "LEBR", "LCAM", "KBBR", "KBBL", "KBIT"]
+          + [f"C{i}Z{c}" for i in range(8) for c in "RGB"])
+ITE_USB = ("048d", "8910")
+
+
+class Session:
+    def __init__(self, dev, delay=0.0, wait=False):
+        self.dev, self.delay, self.wait = dev, delay, wait
+        LOGDIR.mkdir(exist_ok=True)
+        self.path = LOGDIR / time.strftime("kbdtest-%Y%m%d-%H%M%S.jsonl")
+        self.sent = []
+        self.stop = False
+        # Log every WMI write, including ones made inside the real driver (apply_keyboard).
+        self._transact = dev.transact
+        dev.transact = self._send
+
+    # ---- observation ----------------------------------------------------
+    def ec(self):
+        return {n: int(self.dev.read_ec(n), 0) for n in FIELDS}
+
+    @staticmethod
+    def ite_present():
+        for d in glob.glob("/sys/bus/usb/devices/*/idVendor"):
+            base = os.path.dirname(d)
+            try:
+                vid = open(d).read().strip()
+                pid = open(os.path.join(base, "idProduct")).read().strip()
+            except OSError:
+                continue
+            if (vid, pid) == ITE_USB:
+                return True
+        return False
+
+    def wait_ledz(self, timeout=3.0):
+        """Seconds until LEDZ reads 0, or None if it never clears."""
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < timeout:
+            if int(self.dev.read_ec("LEDZ"), 0) == 0:
+                return round(time.monotonic() - t0, 3)
+            time.sleep(0.005)
+        return None
+
+    def log(self, **rec):
+        rec["t"] = time.strftime("%H:%M:%S")
+        with open(self.path, "a") as f:
+            f.write(json.dumps(rec) + "\n")
+        os.chmod(self.path, 0o644)
+
+    # ---- writes -----------------------------------------------------------
+    @staticmethod
+    def describe(cmd, func, a0=0, a1=0, *_):
+        if func == F_LIGHT_EFFECT:
+            return f"effect z{a0} lety{a1 & 0xFF} s{(a1 >> 8) & 0xFF} b{(a1 >> 16) & 0xFF}"
+        if func == F_LIGHT_COLOUR:
+            return (f"colour slot{a0 & 0xFF}/{(a0 >> 8) & 0xFF} grp{(a0 >> 16) & 0xFF} "
+                    f"ZR{a1 & 0xFF:02x} ZG{(a1 >> 8) & 0xFF:02x} ZB{(a1 >> 16) & 0xFF:02x}")
+        if func == 0x0400:
+            return f"kbbl {a0} kbit {a1}"
+        return f"{cmd:04X} {func:04X} {a0:#x} {a1:#x}"
+
+    def _send(self, *args):
+        t0 = time.monotonic()
+        r = self._transact(*args)
+        entry = {"op": self.describe(*args), "status": r.status,
+                 "ms": round((time.monotonic() - t0) * 1000)}
+        if args[0] == WRITE and args[1] == F_LIGHT_EFFECT and self.wait:
+            entry["ledz_clear_s"] = self.wait_ledz()
+        self.sent.append(entry)
+        if self.delay and args[0] == WRITE:
+            time.sleep(self.delay)
+        return r
+
+    def effect(self, zone, lety, spd, bri):
+        return self.dev.transact(WRITE, F_LIGHT_EFFECT, zone, lety | (spd << 8) | (bri << 16))
+
+    def colour(self, slot, count, zr, zg, zb):
+        """Colour by EC register: zr lands in CxZR (verified: red), and so on."""
+        return self.dev.transact(WRITE, F_LIGHT_COLOUR, slot | (count << 8), zr | (zg << 8) | (zb << 16))
+
+    def backlight(self, on, kbit):
+        return self.dev.transact(WRITE, 0x0400, int(not on), kbit)
+
+    # ---- one step ---------------------------------------------------------
+    def step(self, name, expect, fn):
+        """Run fn (the writes), observe, ask. Returns False to stop the run."""
+        self.sent = []
+        err = None
+        try:
+            fn()
+        except Exception as e:
+            err = str(e)
+        t_after = time.monotonic()
+        ledz_clear = self.wait_ledz()
+        snap = self.ec()
+        ite = self.ite_present()
+        print(f"\n== {name}")
+        for s in self.sent:
+            print(f"   {s}")
+        if err:
+            print(f"   ERROR: {err}")
+        print(f"   LEDZ cleared after {ledz_clear}s  ITE on USB: {ite}")
+        print("   EC: " + " ".join(f"{k}={v:#x}" for k, v in snap.items() if not k.startswith("C"))
+              + "  C0=" + "".join(f"{snap[f'C0Z{c}']:02x}" for c in "RGB")
+              + "  C1=" + "".join(f"{snap[f'C1Z{c}']:02x}" for c in "RGB"))
+        print(f"   EXPECT: {expect}")
+        ans = input("   [Enter]=as expected  d=dark  q=quit  or type what you see: ").strip()
+        self.log(step=name, expect=expect, sent=self.sent, error=err, ledz_clear_s=ledz_clear,
+                 ite_usb=ite, ec=snap, answer=ans or "ok",
+                 observe_s=round(time.monotonic() - t_after, 2))
+        if ans == "q":
+            return False
+        if ans == "d":
+            print("   Keyboard dark. Stopping. Try `restore`, then `run backlight --cycles 1`.")
+            return False
+        return True
+
+
+# ---- plans ----------------------------------------------------------------
+def plan_backlight(s, cycles):
+    kbit = int(s.dev.read_ec("KBIT"), 0)
+    for i in range(cycles):
+        if not s.step(f"backlight {i+1}/{cycles}: off", "backlight OFF", lambda: s.backlight(False, kbit)):
+            return
+        if not s.step(f"backlight {i+1}/{cycles}: on", "backlight ON, same look as before", lambda: s.backlight(True, kbit)):
+            return
+
+
+RGB = {"red": 0xFF0000, "green": 0x00FF00, "blue": 0x0000FF, "white": 0xFFFFFF,
+       "yellow": 0xFFFF00, "cyan": 0x00FFFF, "magenta": 0xFF00FF, "orange": 0xFFA000}
+PALETTES = [("red", "green", "blue", "white"), ("white",) * 4, ("cyan", "magenta", "yellow", "orange"),
+            ("blue", "blue", "red", "red"), ("red", "green", "blue", "white")]
+
+
+def plan_driver(s, cycles):
+    """The real driver: MiWmi.apply_keyboard (static), cycling through palettes."""
+    for i in range(cycles):
+        for pal in PALETTES:
+            def fn(pal=pal):
+                s.dev.apply_keyboard([RGB[c] for c in pal], 0, 0, 5)
+            if not s.step(f"driver {i+1}/{cycles}: {' / '.join(pal)}",
+                          f"left to right: {' / '.join(pal)}", fn):
+                return
+
+
+def plan_stress(s, cycles):
+    """apply_keyboard back to back with no pause or prompt, then one check."""
+    pals = PALETTES * max(1, cycles)
+    def fn():
+        for pal in pals:
+            s.dev.apply_keyboard([RGB[c] for c in pal], 0, 0, 5)
+    s.step(f"stress: {len(pals)} applies back to back",
+           f"ends on {' / '.join(pals[-1])}, no flicker-to-dark", fn)
+
+
+def plan_bright(s, cycles):
+    """Driver brightness levels (0 = off .. 5 = brightest; the driver inverts to LEBR)."""
+    for i in range(cycles):
+        for lvl in [5, 4, 3, 2, 1, 0, 5]:
+            def fn(lvl=lvl):
+                s.dev.apply_keyboard([RGB["white"]] * 4, 0, 0, lvl)
+            exp = "OFF" if lvl == 0 else f"white, level {lvl} of 5 (5 = brightest)"
+            if not s.step(f"bright {i+1}/{cycles}: level {lvl}", exp, fn):
+                return
+
+
+def plan_effects(s, cycles):
+    """Final LETY (mode) 2..5. The last area is RED so we can tell whether a
+    one-colour effect uses the last colour written."""
+    pal = [RGB[c] for c in ("blue", "green", "white", "red")]
+    for i in range(cycles):
+        for mode in (2, 3, 4, 5):
+            def fn(mode=mode):
+                s.dev.apply_keyboard(pal, mode, 2, 5)
+            if not s.step(f"effects {i+1}/{cycles}: mode {mode} (speed 2)",
+                          "areas were blue/green/white/red - DESCRIBE the animation + colours", fn):
+                return
+    s.step("effects: back to static", "blue / green / white / red, still",
+           lambda: s.dev.apply_keyboard(pal, 0, 0, 5))
+
+
+def plan_speed(s, cycles):
+    """Mode 2 (colour cycle) at speeds 0..5: which direction is faster?"""
+    for i in range(cycles):
+        for spd in range(6):
+            def fn(spd=spd):
+                s.dev.apply_keyboard([RGB[c] for c in PALETTES[0]], 2, spd, 5)
+            if not s.step(f"speed {i+1}/{cycles}: mode 2, speed {spd}",
+                          "rate of the cycling: slower or faster than the last one?", fn):
+                return
+    s.step("speed: back to static", "red / green / blue / white, still",
+           lambda: s.dev.apply_keyboard([RGB[c] for c in PALETTES[0]], 0, 0, 5))
+
+
+def plan_commit(s, cycles):
+    """GamingBox's real per-zone sequence (disassembled at 0x41b7e0 / 0x41c930):
+    effect(z, bri, spd, 0) -> colours -> effect(z, bri, spd, 1). LETY=1 is the commit."""
+    spd, bri = 0, 0  # raw LEBR 0 = brightest
+    for i in range(cycles):
+        def fn():
+            s.effect(4, 0, spd, bri)
+            s.colour(1, 1, 255, 255, 255)
+            s.effect(4, 1, spd, bri)
+        if not s.step(f"commit {i+1}/{cycles}: zone 4 white, LETY 0 -> colour -> LETY 1",
+                      "area A (or whole kbd) lights up WHITE", fn):
+            return
+
+
+def plan_gbstatic(s, cycles):
+    """Full GamingBox 4-area static apply, one distinct colour per area (by EC register)."""
+    spd, bri = 0, 0  # raw LEBR 0 = brightest
+    areas = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255)]
+
+    def fn():
+        s.effect(4, 0, spd, bri)
+        for z, c in zip((4, 5, 6, 7), areas):
+            s.colour(1, 1, *c)
+            s.effect(z, 1, spd, bri)
+    for i in range(cycles):
+        if not s.step(f"gbstatic {i+1}/{cycles}: A=ZR B=ZG C=ZB D=white",
+                      "4 areas lit - TYPE the colour of each area left to right", fn):
+            return
+
+
+PLANS = {n[5:]: f for n, f in globals().items() if n.startswith("plan_")}
+
+
+def ite_hidraw():
+    for p in glob.glob("/sys/class/hidraw/hidraw*"):
+        if ":048D:8910." in os.path.realpath(os.path.join(p, "device")):
+            return "/dev/" + os.path.basename(p)
+    return None
+
+
+def hid_get_feature(report_id=0x5A, size=16):
+    """Read-only HIDIOCGFEATURE on the ITE chip's vendor report."""
+    import fcntl
+    dev = ite_hidraw()
+    if not dev:
+        return None, "ITE hidraw not found"
+    n = size + 1
+    buf = bytearray(n)
+    buf[0] = report_id
+    req = (3 << 30) | (n << 16) | (ord("H") << 8) | 0x07  # HIDIOCGFEATURE(n)
+    fd = os.open(dev, os.O_RDWR)
+    try:
+        got = fcntl.ioctl(fd, req, buf, True)
+    except OSError as e:
+        return None, f"{dev}: {e}"
+    finally:
+        os.close(fd)
+    return bytes(buf[:max(got, 0) or n]).hex(" "), dev
+
+
+def usb_port_cycle(off_s=3.0):
+    """Disable/re-enable the hub port the ITE chip hangs off (usb1-port10 on a TM1801)."""
+    for d in glob.glob("/sys/bus/usb/devices/*"):
+        try:
+            if (open(d + "/idVendor").read().strip(), open(d + "/idProduct").read().strip()) != ITE_USB:
+                continue
+        except OSError:
+            continue
+        name = os.path.basename(d)              # e.g. 1-10
+        bus, port = name.split("-", 1)
+        if "." in port:
+            sys.exit(f"{name} sits behind a hub; not cycling")
+        ctl = f"/sys/bus/usb/devices/{bus}-0:1.0/usb{bus}-port{port}/disable"
+        print(f"disabling {ctl} for {off_s}s (the built-in keyboard stops typing meanwhile)")
+        open(ctl, "w").write("1")
+        time.sleep(off_s)
+        open(ctl, "w").write("0")
+        print("re-enabled")
+        return ctl
+    sys.exit("ITE device not found on USB")
+
+
+def first_snapshot():
+    files = sorted(LOGDIR.glob("snapshot-*.json"))
+    return files[0] if files else None
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("cmd", choices=["snap", "watch", "run", "restore", "hid", "usbcycle"])
+    ap.add_argument("arg", nargs="?")
+    ap.add_argument("--cycles", type=int, default=3)
+    ap.add_argument("--delay", type=float, default=0.0)
+    ap.add_argument("--wait", action="store_true")
+    a = ap.parse_args()
+    s = Session(AcpiCallWmi(), a.delay, a.wait)
+
+    if a.cmd == "hid":
+        data, dev = hid_get_feature()
+        print(f"{dev}: report 0x5A = {data}")
+        s.log(hid=data, dev=dev, note=a.arg or "")
+        return
+    if a.cmd == "usbcycle":
+        ctl = usb_port_cycle(float(a.arg or 3))
+        time.sleep(2)
+        print(f"ITE on USB: {s.ite_present()}")
+        ans = input("Keyboard light now? (type what you see): ")
+        s.log(usbcycle=ctl, ite_usb=s.ite_present(), answer=ans)
+        return
+    if a.cmd == "snap":
+        snap = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "note": a.arg or "",
+                "ite_usb": s.ite_present(), "ec": s.ec()}
+        out = LOGDIR / time.strftime("snapshot-%Y%m%d-%H%M%S.json")
+        out.write_text(json.dumps(snap, indent=1))
+        os.chmod(out, 0o644)
+        print(json.dumps(snap, indent=1))
+        print(f"saved {out}")
+    elif a.cmd == "watch":
+        secs = float(a.arg or 30)
+        prev = s.ec()
+        print(f"watching {secs:.0f}s; press the keyboard brightness key, etc.")
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < secs:
+            time.sleep(0.5)
+            cur = s.ec()
+            diff = {k: [prev[k], cur[k]] for k in cur if cur[k] != prev[k]}
+            if diff:
+                print(f"{time.monotonic() - t0:6.1f}s  " + "  ".join(f"{k} {a_:#x}->{b:#x}" for k, (a_, b) in diff.items()))
+                s.log(watch=diff)
+            prev = cur
+    elif a.cmd == "run":
+        if a.arg not in PLANS:
+            sys.exit(f"plans: {', '.join(PLANS)}")
+        s.log(run=a.arg, cycles=a.cycles, delay=a.delay, wait=a.wait, ec_before=s.ec())
+        print(f"logging to {s.path}")
+        PLANS[a.arg](s, a.cycles)
+    elif a.cmd == "restore":
+        # The EC only holds the last-written zone, so an EC snapshot can't rebuild the
+        # keyboard. Instead replay the exact writes that led to a working keyboard on
+        # 2026-09-25 10:15 (gbstatic), then the brightness key brought it back.
+        print("replaying known-good sequence (gbstatic: A=ZR B=ZG C=ZB D=white)")
+        s.effect(4, 0, 0, 0)  # LEBR 0 = brightest (inverted scale)
+        for z, c in zip((4, 5, 6, 7), [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255)]):
+            s.colour(1, 1, *c)
+            s.effect(z, 1, 0, 0)
+        for x in s.sent:
+            print(f"   {x}")
+        print("Should be bright now; if still dark, press the keyboard brightness key a few times.")
+        s.log(restore="gbstatic", sent=s.sent, ec=s.ec())
+
+
+if __name__ == "__main__":
+    main()
