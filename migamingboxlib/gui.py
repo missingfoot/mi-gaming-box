@@ -24,14 +24,14 @@ from PySide6.QtWidgets import (
     QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar,
-    QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QStackedWidget, QToolButton,
+    QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QStackedWidget, QToolButton,
     QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 
 from migamingboxlib import macros, miwmi, sysinfo
 
 APP_NAME = "Mi Gaming Box"
-POLL_MS = 2000
+POLL_MS = 2000  # only while the window is open; hidden in the tray, nothing is polled
 PAGE_MARGINS = (16, 12, 16, 12)
 # Like GamingBox's /AutoRun logon task on Windows: start hidden in the tray at login,
 # so "Re-apply lighting" can restore the keyboard after the chip resets at shutdown.
@@ -326,6 +326,9 @@ class InfoForm(QFormLayout):
         super().__init__()
         self.rows = {}
         self.setLabelAlignment(Qt.AlignLeft)
+        # Breeze defaults to FieldsStayAtSizeHint, which wrapped values well short of
+        # the box's edge (and clipped them). Let them use the full width.
+        self.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
     def row(self, key, label=None):
         if key not in self.rows:
@@ -341,6 +344,10 @@ class InfoForm(QFormLayout):
         v.setText(str(text) if text not in (None, "") else "–")
         if tooltip:
             v.setToolTip(tooltip)
+
+    def set_visible(self, key, visible):
+        if key in self.rows:
+            self.setRowVisible(self.rows[key], visible)
 
 
 def section(title):
@@ -438,21 +445,9 @@ class DashboardPage(Page):
         cl.addLayout(self.cpu_form2)
 
         # --- GPUs
-        gpu, gl = section("Graphics")
-        self.gpu_widgets = []
-        for slot, name, codename, _d in self.static["gpus"]:
-            form = InfoForm()
-            form.set("name", name, "GPU", tooltip=f"{name} ({codename})" if codename else None)
-            gl.addLayout(form)
-            meters = {}
-            if "NVIDIA" in name:
-                meters = {"temp": temp_meter("Temperature"),
-                          "util": Meter("Load", 100),
-                          "power": Meter("Power", 80, warn=56, crit=72),
-                          "mem": Meter("Memory", 100)}
-                for m in meters.values():
-                    gl.addWidget(m)
-            self.gpu_widgets.append((form, meters))
+        gpu, self.gpu_lay = section("Graphics")
+        self.gpu_box = None
+        self._build_gpus(self.static["gpus"])
 
         # --- Memory
         mem, ml = section("Memory")
@@ -507,6 +502,14 @@ class DashboardPage(Page):
         bl.addWidget(self.bat_health)
         self.bat_form = InfoForm()
         bl.addLayout(self.bat_form)
+        # Pressed in while on, like Turbo mode (see powersave.py).
+        self.saver = QPushButton("Battery saver")
+        self.saver.setCheckable(True)
+        self.saver.setToolTip("Lets idle devices sleep: Wi-Fi, SSD, USB, audio, card reader, "
+                              "Ethernet, and sets the Power Profile to Power saver.\n"
+                              "Stays on until you turn it off or restart.")
+        self.saver.clicked.connect(win.set_powersave)
+        bl.addWidget(self.saver, 0, Qt.AlignLeft)
 
         # --- System + network
         system, sl = section("System")
@@ -533,6 +536,31 @@ class DashboardPage(Page):
         self.poller.ready.connect(self.update_info)
         self.info_timer = QTimer(self)
         self.info_timer.timeout.connect(self.poller.poll)
+
+    def _build_gpus(self, gpus):
+        """(Re)builds the Graphics box; rebuilt when the GPU switch adds a card."""
+        if self.gpu_box:
+            self.gpu_box.deleteLater()
+        self.gpu_box = QWidget()
+        gl = QVBoxLayout(self.gpu_box)
+        gl.setContentsMargins(0, 0, 0, 0)
+        gl.setSpacing(10)
+        self.gpu_lay.insertWidget(0, self.gpu_box)
+        self.gpu_slots = [g[0] for g in gpus]
+        self.gpu_widgets = []
+        for slot, name, codename, _d in gpus:
+            form = InfoForm()
+            form.set("name", name, "GPU", tooltip=f"{name} ({codename})" if codename else None)
+            gl.addLayout(form)
+            meters = {}
+            if "NVIDIA" in name:
+                meters = {"temp": temp_meter("Temperature"),
+                          "util": Meter("Load", 100),
+                          "power": Meter("Power", 80, warn=56, crit=72),
+                          "mem": Meter("Memory", 100)}
+                for m in meters.values():
+                    gl.addWidget(m)
+            self.gpu_widgets.append((form, meters))
 
     # Only poll the system while this page is on screen.
     def showEvent(self, e):
@@ -589,9 +617,12 @@ class DashboardPage(Page):
             self.cpu_form2.set("boost", "on" if d["boost"] else "off", "Turbo Boost")
 
         # gpus
+        if [g["slot"] for g in d["gpus"]] != self.gpu_slots:
+            self._build_gpus(self.static["gpus"])
         for (form, meters), g in zip(self.gpu_widgets, d["gpus"]):
             nv = g["nvidia"]
-            state = {"active": "active", "suspended": "asleep (saving power)"}.get(g["state"], g["state"])
+            state = {"active": "active", "suspended": "asleep (saving power)",
+                     "off": "off (saving power)"}.get(g["state"], g["state"])
             if g["freq"]:
                 state += f", {g['freq']} MHz"
             if nv:
@@ -641,6 +672,12 @@ class DashboardPage(Page):
                 label = {"Charging": "Charging at", "Discharging": "Using"}.get(b["status"], "Power")
                 self.bat_form.set("draw", f"{b['watts']:.1f} W", label)
                 self.bat_form.labelForField(self.bat_form.rows["draw"]).setText(label)
+            # Like Plasma's applet: time to empty on battery, time to full while charging.
+            if b["time_left"]:
+                label = "Full in" if b["status"] == "Charging" else "Time left"
+                self.bat_form.set("time", sysinfo.human_duration(b["time_left"]), label)
+                self.bat_form.labelForField(self.bat_form.rows["time"]).setText(label)
+            self.bat_form.set_visible("time", bool(b["time_left"]))
             if b["health"]:
                 self.bat_health.setVisible(True)
                 self.bat_health.set(b["health"], f"{b['health']} %")
@@ -696,7 +733,100 @@ class SettingsPage(Page):
         self.on_start.toggled.connect(lambda on: win.settings.setValue("apply_on_start", on))
         al.addWidget(self.on_start)
         lay.addWidget(app)
+
+        # --- NVIDIA GPU on/off (see gpu.py)
+        gfx = QGroupBox("Graphics")
+        gl = QVBoxLayout(gfx)
+        gl.setSpacing(10)
+        row = QHBoxLayout()
+        self.gpu_label = QLabel("NVIDIA GPU: –")
+        self.gpu_btn = QPushButton("Turn on")
+        self.gpu_btn.clicked.connect(lambda: self.gpu_set(not self.gpu_on))
+        row.addWidget(self.gpu_label, 1)
+        row.addWidget(self.gpu_btn)
+        gl.addLayout(row)
+        self.gpu_hint = QLabel()
+        self.gpu_hint.setWordWrap(True)
+        self.gpu_hint.setStyleSheet("color: palette(placeholder-text);")
+        gl.addWidget(self.gpu_hint)
+        gl.addWidget(QLabel("At startup:"))
+        self.start_off = QRadioButton("GPU off (integrated graphics). Longest battery life, "
+                                      "but no HDMI output until you turn the GPU on.")
+        self.start_on = QRadioButton("GPU on (hybrid). The NVIDIA GPU and the HDMI port are "
+                                     "always available, at about 5 W more.")
+        for rb, mode in ((self.start_off, "integrated"), (self.start_on, "hybrid")):
+            rb.toggled.connect(lambda on, m=mode: on and self._gpu_startup(m))
+            gl.addWidget(rb)
+        lay.addWidget(gfx)
         lay.addStretch()
+        self.gpu_on = None
+        self.gpu_mode = None
+
+    # --- NVIDIA GPU ----------------------------------------------------------
+    def refresh_gpu(self):
+        self.win.dev.run(lambda w: w.gpu("status"), self._gpu_update)
+
+    def _gpu_update(self, st):
+        self.gpu_on = st["present"]
+        self.gpu_mode = st["mode"]
+        if self.gpu_on:
+            self.gpu_label.setText("NVIDIA GPU: <b>on</b>")
+            self.gpu_btn.setText("Turn off")
+            self.gpu_hint.setText("Games can use it: right-click a game or app → “Run using "
+                                  "dedicated graphics card”, or start it with prime-run. "
+                                  "It uses about 5 W even when idle.")
+        else:
+            self.gpu_label.setText("NVIDIA GPU: <b>off</b> (saving power)")
+            self.gpu_btn.setText("Turn on")
+            self.gpu_hint.setText("Turn it on before starting a game. The HDMI port only "
+                                  "works while it's on.")
+        for rb, mode in ((self.start_off, "integrated"), (self.start_on, "hybrid")):
+            rb.blockSignals(True)
+            rb.setChecked(st["mode"] == mode)
+            rb.blockSignals(False)
+        self.win.sync_tray_gpu(self.gpu_on)
+
+    def gpu_set(self, on):
+        def work(w):
+            try:
+                return w.gpu("on" if on else "off")
+            except RuntimeError as e:
+                return {"error": str(e)}
+
+        def done(st):
+            if "error" in st:
+                self.win.log(f"GPU: {st['error']}")
+                self._ask_restart()
+                return
+            self.win.log(f"NVIDIA GPU turned {'on' if on else 'off'}")
+            self._gpu_update(st)
+            if on:  # the driver takes a moment to bind after the rescan
+                QTimer.singleShot(2000, self.refresh_gpu)
+        self.gpu_btn.setEnabled(False)
+        self.win.dev.run(work, lambda st: (self.gpu_btn.setEnabled(True), done(st)))
+
+    def _ask_restart(self):
+        """Something (KWin, Xwayland, a game) has the GPU open, so it can only go off at
+        boot. Restart now, or cancel and leave everything as it was."""
+        box = QMessageBox(QMessageBox.Question, APP_NAME,
+                          "The NVIDIA GPU switches off after a restart.", parent=self)
+        box.setInformativeText("It's in use right now (by the desktop or an app), so it "
+                               "can't be switched off while you're logged in.")
+        restart = box.addButton("Restart now", QMessageBox.AcceptRole)
+        restart.setIcon(theme_icon("system-reboot"))
+        box.addButton(QMessageBox.Cancel)
+        box.exec()
+        if box.clickedButton() is not restart:
+            self.refresh_gpu()  # cancelled: nothing changed
+            return
+        self.win.log("NVIDIA GPU: off at the next boot; restarting")
+        self.win.dev.run(lambda w: w.gpu("off-next-boot"), lambda st: restart_computer(self.win))
+
+    def _gpu_startup(self, mode):
+        if mode == self.gpu_mode:
+            return
+        self.win.log(f"GPU at startup: {'off' if mode == 'integrated' else 'on'}")
+        self.win.dev.run(lambda w: w.gpu(f"startup-{mode}"), self._gpu_update)
 
     def _set_autostart(self, on):
         try:
@@ -719,6 +849,8 @@ class SettingsPage(Page):
         self.win.dev.run(lambda w: w.set_kbd_backlight(on), lambda r: self.refresh())
 
     def refresh(self):
+        self.refresh_gpu()
+
         def read(w):
             return {k: w.get_switch(k) for k in self.LABELS}, w.get_kbd_backlight()
 
@@ -993,6 +1125,19 @@ def evdev_name(code):
     if isinstance(names, (list, tuple)):
         names = next((n for n in names if "MIN_INTERESTING" not in n), names[0])
     return names if isinstance(names, str) and names.startswith("KEY_") else None
+
+
+def restart_computer(win):
+    """Restart through KDE when we can (the session closes cleanly and asks about unsaved
+    work), else logind (allowed for the logged-in user)."""
+    if getattr(win.dev, "demo", False):
+        win.log("demo mode: not restarting")
+        return
+    for cmd in (["qdbus6", "org.kde.Shutdown", "/Shutdown", "logoutAndReboot"],
+                ["systemctl", "reboot"]):
+        if shutil.which(cmd[0]) and subprocess.run(cmd, capture_output=True).returncode == 0:
+            return
+    win.log("couldn't restart; please restart the computer yourself")
 
 
 def block_kde_shortcuts(block):
@@ -1745,6 +1890,31 @@ class MainWindow(QMainWindow):
     TRAY_SWITCHES = {"kbbl": "Keyboard backlight", "touchpad": "Touchpad",
                      "fnlock": "Fn lock", "winlock": "Windows key"}
 
+    def refresh_powersave(self):
+        self.dev.run(lambda w: w.powersave("status"), self._powersave_update)
+
+    def set_powersave(self, on):
+        def work(w):
+            try:
+                return w.powersave("on" if on else "off")
+            except RuntimeError as e:  # e.g. an older helper still installed
+                return {"on": not on, "error": str(e)}
+
+        def done(st):
+            self.log(f"Battery saver: {st['error']}" if "error" in st
+                     else f"Battery saver {'on' if st['on'] else 'off'}")
+            self._powersave_update(st)
+        self.dev.run(work, done)
+
+    def _powersave_update(self, st):
+        self.dash.saver.setChecked(st["on"])
+        if getattr(self, "tray", None):
+            self.tray_saver.setChecked(st["on"])
+
+    def sync_tray_gpu(self, on):
+        if getattr(self, "tray", None):
+            self.tray_gpu.setChecked(bool(on))
+
     def sync_tray_switches(self, states):
         for k, on in states.items():
             if getattr(self, "tray", None) and k in self.tray_switches:
@@ -1760,6 +1930,12 @@ class MainWindow(QMainWindow):
         self.tray_turbo = QAction("Turbo mode", menu, checkable=True)
         self.tray_turbo.triggered.connect(lambda on: self.dash._toggle(on))
         menu.addAction(self.tray_turbo)
+        self.tray_gpu = QAction("NVIDIA GPU", menu, checkable=True)
+        self.tray_gpu.triggered.connect(lambda on: self.system.gpu_set(on))
+        menu.addAction(self.tray_gpu)
+        self.tray_saver = QAction("Battery saver", menu, checkable=True)
+        self.tray_saver.triggered.connect(self.set_powersave)
+        menu.addAction(self.tray_saver)
         menu.addSeparator()
         self.tray_switches = {}
         for key, text in self.TRAY_SWITCHES.items():
@@ -1771,6 +1947,8 @@ class MainWindow(QMainWindow):
             menu.addAction(act)
             self.tray_switches[key] = act
         menu.aboutToShow.connect(self.system.refresh)
+        menu.aboutToShow.connect(self.refresh_powersave)
+        menu.aboutToShow.connect(self.refresh_fan)
         menu.addSeparator()
         menu.addAction("Show", self.showNormal)
         menu.addAction("Quit", self._quit)
@@ -1786,7 +1964,10 @@ class MainWindow(QMainWindow):
         self.log(f"backend: {desc}")
         self.refresh_fan()
         self.system.refresh()
-        self.timer.start(POLL_MS)
+        self.refresh_powersave()
+        self.connected = True
+        if self.isVisible():
+            self.timer.start(POLL_MS)
         if as_bool(self.settings.value("apply_on_start", "false")):
             self.keyboard.apply()
             self.ambient.apply()
@@ -1809,15 +1990,21 @@ class MainWindow(QMainWindow):
         def done(r):
             self.dash.update_fan(r)
             if self.tray and status_ok(r):
-                on = bool(r.value)
-                self.tray_turbo.setChecked(on)
-                f1, f2, cpu, gpu = r.words
-                self.tray.setToolTip(f"{APP_NAME}\nCPU {cpu}°C · GPU {gpu}°C\n"
-                                     f"Fans {f1}/{f2} rpm · Turbo {'on' if on else 'off'}")
+                self.tray_turbo.setChecked(bool(r.value))
         self.dev.run(lambda w: w.get_fan(), done)
 
     def log(self, text):
         self.log_page.log(text)
+
+    def showEvent(self, e):
+        if getattr(self, "connected", False):
+            self.refresh_fan()
+            self.timer.start(POLL_MS)
+        super().showEvent(e)
+
+    def hideEvent(self, e):
+        self.timer.stop()
+        super().hideEvent(e)
 
     def closeEvent(self, event):
         if self.tray and self.tray.isVisible():

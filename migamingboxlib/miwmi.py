@@ -10,6 +10,8 @@ and the acpi_call module (Arch/AUR: acpi_call-dkms).
     sudo miwmi fnlock|winlock|touchpad|powerled on|off
     sudo miwmi kbdlight on|off
     sudo miwmi light [ZONE ...]    # read a lighting zone's state (default: 2 3 = left/right bar)
+    sudo miwmi gpu [status|on|off|off-next-boot|startup-integrated|startup-hybrid]   # NVIDIA GPU power
+    sudo miwmi powersave [status|on|off]   # battery saver (idle power settings)
     sudo miwmi ec [FIELD ...]      # read EC fields, default: the lighting registers
     sudo miwmi raw FA00 0102 [arg0 arg1 ...]
     migamingbox-helper             # JSON-lines root helper used by the GUI (via pkexec)
@@ -257,6 +259,14 @@ class AcpiCallWmi(MiWmi):
         from migamingboxlib import macros
         return macros.save(cfg)
 
+    def gpu(self, op):
+        from migamingboxlib import gpu
+        return gpu.request(op)
+
+    def powersave(self, op):
+        from migamingboxlib import powersave
+        return powersave.request(op)
+
     def read_ec(self, name):
         """Read a named EC field from the DSDT (e.g. LETY) - read-only diagnostics."""
         if not name.isalnum() or len(name) > 4:
@@ -311,6 +321,21 @@ class HelperWmi(MiWmi):
             raise RuntimeError(resp["error"])
         return bytes.fromhex(resp["reply"])
 
+    def _request(self, key, value):
+        with self.lock:
+            self.proc.stdin.write(json.dumps({key: value}) + "\n")
+            self.proc.stdin.flush()
+            resp = self._readline()
+        if "error" in resp:
+            raise RuntimeError(resp["error"])
+        return resp[key]
+
+    def gpu(self, op):
+        return self._request("gpu", op)
+
+    def powersave(self, op):
+        return self._request("powersave", op)
+
     def save_macros(self, cfg):
         with self.lock:
             self.proc.stdin.write(json.dumps({"macros": cfg}) + "\n")
@@ -334,6 +359,28 @@ class MockWmi(MiWmi):
         self.state[(F_FAN, 0)] = 0
         self.state[(F_KBD_BACKLIGHT, 0)] = 0  # KBBL 0 = backlight on
         self.macros = None  # demo: saved macro config lives only in memory
+        # demo: busy like a real hybrid session, so Turn off shows the restart prompt
+        self.gpu_state = {"mode": "hybrid", "present": True, "power": "on", "busy": True}
+        self.powersave_on = False
+
+    def powersave(self, op):
+        if op in ("on", "off"):
+            self.powersave_on = op == "on"
+        return {"on": self.powersave_on}
+
+    def gpu(self, op):
+        st = self.gpu_state
+        if op == "on":
+            st.update(present=True, power="on")
+        elif op == "off":
+            if st.get("busy"):
+                raise RuntimeError("the NVIDIA GPU is in use by kwin_wayland, Xwayland")
+            st.update(present=False, power="off")
+        elif op == "off-next-boot":
+            st["off_next_boot"] = True
+        elif op.startswith("startup-"):
+            st["mode"] = op[len("startup-"):]
+        return dict(st)
 
     def save_macros(self, cfg):
         from migamingboxlib import macros
@@ -372,6 +419,15 @@ def serve():
             continue
         try:
             req = json.loads(line)
+            if "gpu" in req:
+                from migamingboxlib import gpu
+                print(json.dumps({"gpu": gpu.request(str(req["gpu"]))}), flush=True)
+                continue
+            if "powersave" in req:
+                from migamingboxlib import powersave
+                print(json.dumps({"powersave": powersave.request(str(req["powersave"]))}),
+                      flush=True)
+                continue
             if "macros" in req:
                 # Validated in macros.save before anything is written.
                 from migamingboxlib import macros
@@ -392,6 +448,14 @@ def main(argv):
     op = argv[1]
     if op == "serve":
         serve()
+        return
+    if op == "gpu":
+        from migamingboxlib import gpu
+        gpu.main(argv[2:])
+        return
+    if op == "powersave":
+        from migamingboxlib import powersave
+        powersave.main(argv[2:])
         return
     dev = AcpiCallWmi()
     if op == "status":

@@ -14,7 +14,7 @@ PKGVER  = $(shell sed -n 's/^pkgver=//p' PKGBUILD)
 PKGREL  = $(shell sed -n 's/^pkgrel=//p' PKGBUILD)
 PKGFILE = mi-gaming-box-$(PKGVER)-$(PKGREL)-any.pkg.tar.zst
 # The GUI process (not the root helper, whose name ends in -helper).
-GUI_PAT = [/ ]migamingbox$$
+GUI_PAT = [/ ]migamingbox( --tray)?$$
 
 # Quit any running GUI (it's single-instance, so it would swallow the new launch).
 define quit_gui
@@ -45,6 +45,7 @@ install:
 	install -d $(LIB)/migamingboxlib
 	install -m644 migamingboxlib/*.py $(LIB)/migamingboxlib/
 	install -Dm644 dist/mikeysd.service $(DESTDIR)/usr/lib/systemd/system/mikeysd.service
+	install -Dm644 dist/mi-gaming-box-gpu.service $(DESTDIR)/usr/lib/systemd/system/mi-gaming-box-gpu.service
 	install -Dm644 dist/mi-gaming-box-modules.conf $(DESTDIR)/usr/lib/modules-load.d/mi-gaming-box.conf
 	install -Dm644 dist/io.github.missingfoot.migamingbox.policy \
 		$(SHARE)/polkit-1/actions/io.github.missingfoot.migamingbox.policy
@@ -59,6 +60,7 @@ uninstall:
 	rm -f $(BIN)/migamingbox $(BIN)/miwmi $(BIN)/mikeysd
 	rm -rf $(LIB)
 	rm -f $(DESTDIR)/usr/lib/systemd/system/mikeysd.service
+	rm -f $(DESTDIR)/usr/lib/systemd/system/mi-gaming-box-gpu.service
 	rm -f $(DESTDIR)/usr/lib/modules-load.d/mi-gaming-box.conf
 	rm -f $(SHARE)/polkit-1/actions/io.github.missingfoot.migamingbox.policy
 	rm -f $(SHARE)/applications/migamingbox.desktop

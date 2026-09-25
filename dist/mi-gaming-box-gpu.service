@@ -1,0 +1,20 @@
+[Unit]
+Description=Mi Gaming Box: start with the NVIDIA GPU switched off (integrated graphics)
+Documentation=https://github.com/missingfoot/mi-gaming-box
+# Detach the GPU after the drivers load but before the login screen can open it.
+After=systemd-modules-load.service systemd-udev-trigger.service
+Before=display-manager.service
+# Runs if either exists (the "|" makes them alternatives): the startup mode, or
+# a one-off "off at the next boot" from the app's Turn off button.
+ConditionPathExists=|/etc/mi-gaming-box/gpu-mode
+ConditionPathExists=|/etc/mi-gaming-box/gpu-off-next-boot
+# Escape hatch: add mi_gaming_box.gpu=hybrid to the kernel command line.
+ConditionKernelCommandLine=!mi_gaming_box.gpu=hybrid
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/miwmi gpu boot
+TimeoutStartSec=30
+
+[Install]
+WantedBy=graphical.target

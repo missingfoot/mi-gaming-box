@@ -6,12 +6,15 @@ static()  -> things that don't change while the app runs (OS, CPU model, GPUs, .
 live(prev) -> readings for one poll; pass the previous result back in so CPU usage
               can be worked out from the /proc/stat delta.
 """
+import fcntl
 import functools
 import glob
 import os
 import platform
 import re
 import shutil
+import socket
+import struct
 import subprocess
 import time
 
@@ -112,7 +115,25 @@ def gpus():
             vendor_word, _, codename = head.partition(" ")
             name = f"{vendor_word} {market}"
         found.append((slot, name, codename, d))
+    if (os.path.exists("/run/mi-gaming-box/gpu-bridge")
+            and not any("NVIDIA" in g[1] for g in found)):
+        found.append(("", "NVIDIA GPU", "", ""))  # switched off before we looked (gpu.py)
     return found
+
+
+def _gpu_slots():
+    return sorted(os.path.basename(d) for d in glob.glob("/sys/bus/pci/devices/*")
+                  if _read(f"{d}/class").startswith("0x03"))
+
+
+def refresh_gpus(known):
+    """Re-reads the GPU list after a card appears (the GPU switch turned it on).
+    A card that has gone away stays listed, so it shows as off."""
+    now = [g for g in gpus() if g[0]]
+    slots = {g[0] for g in now}
+    has_nvidia = any("NVIDIA" in g[1] for g in now)
+    gone = [g for g in known if g[0] not in slots and not (has_nvidia and "NVIDIA" in g[1])]
+    return sorted(now + gone, key=lambda g: g[3] or "~")
 
 
 def _whole_disk(dev):
@@ -275,6 +296,22 @@ def chipset_name():
     return "Chipset"
 
 
+# Reading an NVMe drive's temperature sends it an admin command, which keeps it out of
+# its deepest idle state for a moment, so it's read at most this often.
+NVME_EVERY_S = 10
+_nvme_cache = {}  # sysfs path -> (monotonic time, value)
+
+
+def _temp(path, slow):
+    if not slow:
+        return _int(path)
+    t, v = _nvme_cache.get(path, (None, None))
+    if t is None or time.monotonic() - t >= NVME_EVERY_S:
+        v = _int(path)
+        _nvme_cache[path] = (time.monotonic(), v)
+    return v
+
+
 def temperatures():
     """[(group, label, °C)] from every hwmon sensor. Skips acpitz: on the TM1801 its
     two zones just mirror the EC's CPU/GPU readings (already in the Cooling box)."""
@@ -290,7 +327,7 @@ def temperatures():
         inputs = sorted(glob.glob(f"{h}/temp*_input"),
                         key=lambda p: int(os.path.basename(p)[4:].split("_")[0]))
         for f in inputs:
-            v = _int(f)
+            v = _temp(f, name == "nvme")
             if v is None:
                 continue
             label = _read(f.replace("_input", "_label"))
@@ -356,11 +393,53 @@ def battery():
             watts = _int(f"{d}/power_now") / 1e6
         elif _int(f"{d}/current_now") is not None and _int(f"{d}/voltage_now"):
             watts = _int(f"{d}/current_now") * _int(f"{d}/voltage_now") / 1e12
+        status = _read(f"{d}/status")
         return {"name": _read(f"{d}/model_name") or os.path.basename(d),
-                "capacity": _int(f"{d}/capacity"), "status": _read(f"{d}/status"),
+                "capacity": _int(f"{d}/capacity"), "status": status,
                 "health": round(100 * full / design) if full and design else None,
-                "cycles": _int(f"{d}/cycle_count"), "watts": watts}
+                "cycles": _int(f"{d}/cycle_count"), "watts": watts,
+                "time_left": battery_time(d, status)}
     return None
+
+
+def battery_time(d, status):
+    """Seconds until empty (discharging) or full (charging), else None. UPower's
+    smoothed estimate, the one Plasma's battery applet shows; the battery's own
+    charge / current if UPower isn't there (jumpier)."""
+    prop = {"Discharging": "TimeToEmpty", "Charging": "TimeToFull"}.get(status)
+    if not prop:
+        return None
+    secs = _upower(prop)
+    if secs:
+        return secs
+    now = _int(f"{d}/charge_now") or _int(f"{d}/energy_now")
+    full = _int(f"{d}/charge_full") or _int(f"{d}/energy_full")
+    rate = _int(f"{d}/current_now") or _int(f"{d}/power_now")
+    if not (now and full and rate):
+        return None
+    left = now if status == "Discharging" else full - now
+    return round(3600 * left / rate) if left > 0 else None
+
+
+def _upower(prop):
+    """A property of UPower's DisplayDevice over D-Bus (no subprocess), or None."""
+    try:
+        from PySide6.QtDBus import QDBusConnection, QDBusMessage
+    except ImportError:
+        return None
+    msg = QDBusMessage.createMethodCall(
+        "org.freedesktop.UPower", "/org/freedesktop/UPower/devices/DisplayDevice",
+        "org.freedesktop.DBus.Properties", "Get")
+    msg.setArguments(["org.freedesktop.UPower.Device", prop])
+    reply = QDBusConnection.systemBus().call(msg, timeout=1000)
+    if reply.type() != QDBusMessage.ReplyMessage or not reply.arguments():
+        return None
+    value = reply.arguments()[0]
+    value = getattr(value, "variant", lambda: value)()  # a QDBusVariant, or already unwrapped
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def ac_online():
@@ -373,7 +452,7 @@ def ac_online():
 def nvidia(sysfs_dir):
     """nvidia-smi readings, but only while the GPU is already awake: querying it would
     otherwise wake it from runtime suspend and cost battery. None = asleep/unavailable."""
-    if _read(f"{sysfs_dir}/power/runtime_status", "active") != "active" or not shutil.which("nvidia-smi"):
+    if gpu_state(sysfs_dir) != "active" or not shutil.which("nvidia-smi"):
         return None
     q = ("temperature.gpu,utilization.gpu,power.draw,power.limit,clocks.gr,memory.used,"
          "memory.total,pstate")
@@ -399,6 +478,8 @@ def nvidia(sysfs_dir):
 
 
 def gpu_state(sysfs_dir):
+    if not os.path.exists(sysfs_dir):
+        return "off"  # detached by the GPU switch (gpu.py)
     return _read(f"{sysfs_dir}/power/runtime_status", "active")
 
 
@@ -415,20 +496,25 @@ def disk_usage(mounts):
     return rows
 
 
+SIOCGIFADDR, SIOCGIFNETMASK = 0x8915, 0x891B
+
+
 def network():
-    """[(interface, IPv4/prefix)] for interfaces that are up, via `ip -brief`."""
-    if not shutil.which("ip"):
-        return []
-    try:
-        out = subprocess.run(["ip", "-brief", "-4", "addr"], capture_output=True, text=True,
-                             timeout=2).stdout
-    except (OSError, subprocess.SubprocessError):
-        return []
+    """[(interface, IPv4/prefix)] for interfaces with an IPv4 address, in interface order.
+    Asks the kernel directly (ioctl), like `ip -brief -4 addr` but without a subprocess."""
+    ifaces = sorted((_int(f"/sys/class/net/{n}/ifindex") or 0, n)
+                    for n in os.listdir("/sys/class/net") if n != "lo")
     rows = []
-    for line in out.splitlines():
-        parts = line.split()
-        if len(parts) >= 3 and parts[0] != "lo":
-            rows.append((parts[0], parts[2]))
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        for _i, name in ifaces:
+            req = struct.pack("256s", name.encode()[:15])
+            try:
+                addr = fcntl.ioctl(sock.fileno(), SIOCGIFADDR, req)[20:24]
+                mask = fcntl.ioctl(sock.fileno(), SIOCGIFNETMASK, req)[20:24]
+            except OSError:  # no IPv4 address
+                continue
+            prefix = bin(int.from_bytes(mask, "big")).count("1")
+            rows.append((name, f"{socket.inet_ntoa(addr)}/{prefix}"))
     return rows
 
 
@@ -442,13 +528,15 @@ def live(prev=None, st=None):
     cpu = "/sys/devices/system/cpu"
     no_turbo = _read(f"{cpu}/intel_pstate/no_turbo")
     st = st or {}
+    if "gpus" in st and _gpu_slots() != sorted(g[0] for g in st["gpus"] if g[3] and os.path.exists(g[3])):
+        st["gpus"] = refresh_gpus(st["gpus"])
     gpus_live = []
     for slot, name, _code, d in st.get("gpus", []):
         state = gpu_state(d)
         info = nvidia(d) if "NVIDIA" in name else None
         freq = _int(glob.glob(f"{d}/drm/card*/gt_cur_freq_mhz")[0]) if glob.glob(
             f"{d}/drm/card*/gt_cur_freq_mhz") else None
-        gpus_live.append({"name": name, "state": state, "nvidia": info, "freq": freq})
+        gpus_live.append({"slot": slot, "name": name, "state": state, "nvidia": info, "freq": freq})
     return {
         "_cpu": (total, idle),
         "cpu_usage": usage,

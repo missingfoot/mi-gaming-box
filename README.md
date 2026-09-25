@@ -24,6 +24,8 @@ interface was worked out is documented in [FINDINGS.md](FINDINGS.md).
 | 5 macro keys: shortcuts, typed text, commands, multi-step macros | ✅ keys tested, editor new |
 | Fn lock, Windows key, touchpad | ✅ reading tested, switching expected to work |
 | Keyboard backlight on/off | ✅ tested |
+| NVIDIA GPU off / on (integrated or hybrid at startup, turn on live) | 🧪 new |
+| Battery saver (powertop-style idle power settings, reversible) | 🧪 new |
 | Keyboard RGB (4 areas, brightness 0–5, speed, Static / Breath effects) | ✅ tested (`tools/kbdtest`) |
 | Ambient light bars (left / right: off, steady, breathing, colour cycle) | ✅ works (TM1801) |
 
@@ -43,17 +45,34 @@ Everything at a glance, shown at the top of this page. **Turbo mode** sits with 
 speeds and the embedded controller's CPU/GPU temperatures. Below that are the other
 temperature sensors, CPU load and clock, both GPUs (the NVIDIA card is only read while
 it's already awake, so the page never wakes it and drains your battery), memory,
-battery health, storage and system info.
+battery (time left, health), storage and system info.
+
+**Battery saver** (in the Battery box and the tray menu) makes the same idle power
+settings as `powertop --auto-tune`: idle PCI and USB devices sleep, the SATA link and the
+audio codec power down, and the disk is flushed less often. With the NVIDIA GPU off it took
+the laptop from about 13 W to about 10 W at idle. It also moves Plasma's Power Profile to
+Power saver (the CPU clocks up less eagerly) and back to Balanced when you turn it off. USB input
+devices are left alone (autosuspend can delay the first keypress or mouse move). Turning it
+off puts every setting back as it was; a restart turns it off too.
 
 ### Settings
 
-![Settings: keyboard and touchpad switches, start at login](docs/screenshots/settings.png)
+![Settings: keyboard and touchpad switches, start at login, graphics](docs/screenshots/settings.png)
 
 The laptop's own switches: **Fn lock**, the **Windows key**, the **touchpad** and the
 **keyboard backlight**. They also sit in the tray menu. **Start at login** puts the app
 in the tray when you log in, and **Re-apply lighting** restores your colours after a
 reboot. The keyboard's lighting chip forgets them at shutdown, and GamingBox on Windows
 fixes this the same way.
+
+**Graphics** can switch the NVIDIA GPU off for much better battery life. This GTX 1060
+is too old to power itself down, so it otherwise idles at around 5 W. Choose whether the
+laptop **starts with the GPU off** (integrated graphics) or on (hybrid), and **turn it on**
+whenever you need it for a game, with no restart. It's also in the tray menu. Turning it
+off happens straight away if nothing is using it, otherwise at the next restart. The
+HDMI port is wired to the NVIDIA GPU, so it only works while the GPU is on. If a boot
+ever goes wrong, add `mi_gaming_box.gpu=hybrid` to the kernel command line in your boot
+menu to start with the GPU on.
 
 ### Keyboard lighting
 
@@ -143,7 +162,8 @@ The Debian/Ubuntu and Fedora package names are best-effort and untested. Correct
   raw key events.
 - **CLI**: `sudo miwmi status`, `sudo miwmi turbo on|off`,
   `sudo miwmi fnlock|winlock|touchpad|powerled|kbdlight on|off`, and
-  `sudo miwmi light` to read the ambient lights' settings, and
+  `sudo miwmi light` to read the ambient lights' settings, `sudo miwmi gpu status|on|off`,
+  `sudo miwmi powersave status|on|off`, and
   `sudo miwmi raw FA00 0102` for any raw command.
 
 ## Other models
