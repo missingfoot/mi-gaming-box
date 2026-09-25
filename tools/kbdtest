@@ -15,6 +15,7 @@ Quit the GUI and stop mikeysd first so nothing else touches acpi_call:
     sudo tools/kbdtest watch [secs]            # snapshots every 0.5 s, logs changes (try the Fn brightness key)
     sudo tools/kbdtest run PLAN [--cycles N] [--delay S] [--wait]
     sudo tools/kbdtest restore                 # replay the known-good sequence (see below)
+    sudo tools/kbdtest restore bars            # put the rear bars back on the factory cycle
     sudo tools/kbdtest hid [note]              # read-only: ITE chip feature report 0x5A
     sudo tools/kbdtest usbcycle [secs]         # power-cycle the ITE chip's USB port (soft reset test)
 
@@ -27,6 +28,9 @@ Plans (the old bare-LETY-0 plans were removed: that write blacks the keyboard ou
     bright      apply_keyboard white at levels 5..0, then 5 (0 = off)
     effects     final LETY 2..5, areas blue/green/white/red; describe what you see
     speed       mode 2 at speeds 0..5
+    bars        rear light bars: which zone is which, modes 0-3, brightness, speed,
+                then back to the factory cycle (also: `restore bars`)
+    barbright   bar brightness side by side: left = reference, right steps LEBR 0..7
 
 --delay S   pause between individual writes inside a step (default 0)
 --wait      after each effect write, poll until the EC clears LEDZ before going on
@@ -41,7 +45,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
-from migamingboxlib.miwmi import AcpiCallWmi, WRITE, F_LIGHT_EFFECT, F_LIGHT_COLOUR  # noqa: E402
+from migamingboxlib.miwmi import (AcpiCallWmi, WRITE, F_LIGHT_EFFECT, F_LIGHT_COLOUR,  # noqa: E402
+                                  BAR_FACTORY, BAR_BRIGHTNESS_MAX, ZONE_BARS)
 
 LOGDIR = REPO / "testlogs"
 FIELDS = (["LEDZ", "LETY", "LSPD", "LEBR", "LCAM", "KBBR", "KBBL", "KBIT"]
@@ -56,6 +61,7 @@ class Session:
         self.path = LOGDIR / time.strftime("kbdtest-%Y%m%d-%H%M%S.jsonl")
         self.sent = []
         self.stop = False
+        self.bars = False  # also read back and show zones 1-3 after each step
         # Log every WMI write, including ones made inside the real driver (apply_keyboard).
         self._transact = dev.transact
         dev.transact = self._send
@@ -148,10 +154,16 @@ class Session:
         print("   EC: " + " ".join(f"{k}={v:#x}" for k, v in snap.items() if not k.startswith("C"))
               + "  C0=" + "".join(f"{snap[f'C0Z{c}']:02x}" for c in "RGB")
               + "  C1=" + "".join(f"{snap[f'C1Z{c}']:02x}" for c in "RGB"))
+        bars = None
+        if self.bars:
+            bars = {z: self.dev.read_light(z) for z in ZONE_BARS}
+            for z, st in bars.items():
+                print(f"   zone {z}: effect={st['effect']} speed={st['speed']} brightness={st['brightness']} "
+                      + " ".join(f"#{c:06X}" for c in st["colours"]))
         print(f"   EXPECT: {expect}")
         ans = input("   [Enter]=as expected  d=dark  q=quit  or type what you see: ").strip()
         self.log(step=name, expect=expect, sent=self.sent, error=err, ledz_clear_s=ledz_clear,
-                 ite_usb=ite, ec=snap, answer=ans or "ok",
+                 ite_usb=ite, ec=snap, bars=bars, answer=ans or "ok",
                  observe_s=round(time.monotonic() - t_after, 2))
         if ans == "q":
             return False
@@ -267,6 +279,57 @@ def plan_gbstatic(s, cycles):
             return
 
 
+def bar(s, zone, mode, colours, spd=0, bri=0):
+    """bri is raw LEBR here (0 = brightest); apply_bar takes a level, and the EC clamps
+    LEBR/LSPD at 2 anyway, so the old 3..7 steps now all send 2."""
+    return lambda: s.dev.apply_bar(zone, [RGB[c] for c in colours], spd,
+                                   BAR_BRIGHTNESS_MAX - min(bri, BAR_BRIGHTNESS_MAX), mode)
+
+
+def restore_bars(s):
+    f = BAR_FACTORY
+    for z in ZONE_BARS:
+        s.dev.apply_bar(z, f["colours"], f["speed"], f["brightness"], f["effect"])
+
+
+def plan_bars(s, cycles):
+    """Rear light bars via MiWmi.apply_bar (GamingBox's 0x41b5a0 sequence). Raw LEBR/LSPD."""
+    s.bars = True
+    steps = [
+        ("zone 3, mode 1, white", "BOTH bars steady white?", bar(s, 3, 1, ["white"])),
+        ("zone 1, mode 1, green", "which bar went green: left, right, both, none?", bar(s, 1, 1, ["green"])),
+        ("zone 2, mode 1, blue", "which bar went blue: left, right, both, none?", bar(s, 2, 1, ["blue"])),
+        ("zone 3, mode 2, red", "both bars red - steady, breathing, or something else?", bar(s, 3, 2, ["red"])),
+        ("zone 3, mode 0", "bars OFF?", bar(s, 3, 0, ["white"])),
+        ("zone 3, mode 1, white (back on)", "both bars steady white again?", bar(s, 3, 1, ["white"])),
+    ]
+    steps += [(f"zone 3, mode 1, white, LEBR {b}", "brighter or dimmer than the last step? (off?)",
+               bar(s, 3, 1, ["white"], bri=b)) for b in range(6)]
+    steps += [(f"zone 3, mode 3 cycle red/green/blue, speed {v}", "cycling in red/green/blue? faster or slower than last?",
+               bar(s, 3, 3, ["red", "green", "blue"], spd=v)) for v in range(5)]
+    for name, expect, fn in steps:  # one pass; --cycles is ignored here
+        if not s.step(f"bars: {name}", expect, fn):
+            break
+    s.step("bars: back to factory cycle", "back to the original 4-colour breathing cycle?",
+           lambda: restore_bars(s))
+
+
+def plan_barbright(s, cycles):
+    """LEBR scale, side by side: left bar (zone 2) stays white at LEBR 0 as the
+    reference, the right bar (zone 3) steps through LEBR 0..7."""
+    s.bars = True
+    if not s.step("barbright: both white, LEBR 0", "BOTH bars steady white, equally bright?",
+                  lambda: (bar(s, 2, 1, ["white"])(), bar(s, 3, 1, ["white"])())):
+        return
+    for b in range(1, 8):
+        if not s.step(f"barbright: right LEBR {b} (left stays LEBR 0)",
+                      "RIGHT vs LEFT: same / a bit dimmer / much dimmer / off / brighter?",
+                      bar(s, 3, 1, ["white"], bri=b)):
+            break
+    s.step("barbright: back to factory cycle (both bars)",
+           "both bars back on the 4-colour breathing cycle?", lambda: restore_bars(s))
+
+
 PLANS = {n[5:]: f for n, f in globals().items() if n.startswith("plan_")}
 
 
@@ -373,6 +436,12 @@ def main():
         s.log(run=a.arg, cycles=a.cycles, delay=a.delay, wait=a.wait, ec_before=s.ec())
         print(f"logging to {s.path}")
         PLANS[a.arg](s, a.cycles)
+    elif a.cmd == "restore" and a.arg == "bars":
+        restore_bars(s)
+        for x in s.sent:
+            print(f"   {x}")
+        s.log(restore="bars", sent=s.sent)
+        print("Bars should be back on the factory 4-colour cycle.")
     elif a.cmd == "restore":
         # The EC only holds the last-written zone, so an EC snapshot can't rebuild the
         # keyboard. Instead replay the exact writes that led to a working keyboard on

@@ -101,7 +101,7 @@ Turbo on/off and all reads were tested on 2026-09-25 and returned status 0.
 
 The EC fields live in `EMEM` (SystemMemory 0xFE708000). The lighting block starts at +0xB00.
 Keyboard areas A–D are LEDZ 4–7 (GamingBox writes zones 4,5,6,7, then the final effect on 4).
-The rear bars are probably LEDZ 1/2 (not yet verified).
+The rear bars are LEDZ 2 (left) and 3 (right).
 UI effect names: Static, Breath, Wave, Colorful (→ LETY 0–3).
 Colour byte order: GamingBox sends 0x00RRGGBB little-endian (byte8=B), although the EC
 field names suggest byte8=R. Verify by eye.
@@ -133,10 +133,38 @@ field names suggest byte8=R. Verify by eye.
 - EC lighting registers survive a shutdown. What a shutdown resets is the ITE chip.
 - The ITE chip's HID feature report 0x5A reads `00 ff…` while lit (not informative yet).
 
+## Rear light bars: status read + factory state (2026-09-25)
+
+- **Reading a zone is safe**: GamingBox's GetLedStatus (0x419c20, used by 0x41cd20) sends
+  `FA00 0100` with arg0 = **zone + 0x10** (the EC's read flag) and arg1 = 0, which returns
+  LCAM (count) in u32@4 and LETY/LSPD/LEBR in bytes 8/9/10. Then one call per colour pair,
+  arg1 = `(count << 8) | pair`, returns two colours at bytes 12–14 and 16–18 (R, G, B).
+  `sudo miwmi light [ZONE ...]` does this.
+- Factory state read on a TM1801 (bars visibly cycling 4 colours in a breathing pattern):
+
+  | zone | LETY | LSPD | LEBR | colours |
+  |---|---|---|---|---|
+  | 0, 1 | 0 | 0 | 0 | none |
+  | 2, 3 | 3 | 0 | 0 | E10000 0087FF 00FF14 FFAA00 |
+  | 4 (keyboard) | 1 | 0 | 0 | E10000 |
+
+  These are GamingBox's first bar preset (FF0000 0087FF 00FF14 FFAA00). Red FF reads back as E1,
+  so the EC probably scales red.
+- **GamingBox's bar routine (0x41b5a0)**: `effect(zone, LETY 0)`, then only if mode ≠ 0 the colours
+  in group 1 (the whole list for mode 3, otherwise just the first), then `effect(zone, LETY = mode)`.
+  There's **no LETY 1 commit** like the keyboard's. Its args: brightness → LEBR, speed → LSPD.
+  Mode 0 never sends colours, so it's probably "off". GamingBox's bar page has no effect picker, only
+  colours (≤ 5), brightness (5 steps) and speed (4 steps).
+- **Verified with `kbdtest run bars` (2026-09-25):** LEDZ **2 = left bar, 3 = right bar**, and 1 shows
+  nothing. LETY **0 = off, 1 = steady, 2 = breathing (one colour), 3 = cycle through the list**
+  (the factory animation). LSPD 0 = slowest, and the effect gets faster with higher values.
+- **The EC clamps bar LEBR and LSPD at 2**: writing 3–7 reads back as 2, and speeds 3 and 4 looked the
+  same as 2. Brightness: 0 is brightest, and 2 is a little dimmer (subtle, `kbdtest run barbright`).
+- After writes, zone 1 reads back the last write, so the status read is only a rough check.
+
 ## Still to confirm
 - Which LETY value (>1) is Breath / Wave / Colorful on the keyboard (`kbdtest run effects`).
 - What mode 3 is exactly (wave?), and GamingBox's UI-effect → mode mapping.
-- LEDZ values for the rear light bars (GamingBox uses colour group 1 and zone 3 for "both bars").
 - Meaning of ARPL, ATFN and KBIT (KBIT: writing various values had no visible effect on the backlight).
 
 ## Macro keys (the 5 extra keys)
