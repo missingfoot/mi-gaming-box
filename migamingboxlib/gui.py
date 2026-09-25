@@ -7,8 +7,11 @@ Runs as your user. Hardware access goes through a small root helper
 """
 import os
 import queue
+import shutil
+import subprocess
 import sys
 import threading
+import time
 import traceback
 
 from PySide6.QtCore import QEvent, QObject, QSettings, QSize, Qt, QTimer, Signal
@@ -16,13 +19,13 @@ from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPalette, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QColorDialog, QComboBox, QFormLayout, QFrame, QGridLayout,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
+    QGroupBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow,
     QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSlider,
-    QSpinBox, QStackedWidget,
+    QStackedWidget,
     QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 
-from migamingboxlib import miwmi, sysinfo
+from migamingboxlib import keysd, miwmi, sysinfo
 
 APP_NAME = "Mi Gaming Box"
 POLL_MS = 2000
@@ -346,7 +349,7 @@ class InfoPoller(QObject):
 
 class DashboardPage(Page):
     title = "Dashboard"
-    icon = ("go-home-symbolic", "go-home")
+    icon = ("home", "go-home")
     FAN_MAX = 7000  # turbo runs both fans at ~6700 rpm
 
     def __init__(self, win):
@@ -376,7 +379,6 @@ class DashboardPage(Page):
         for m in (self.cpu_t, self.gpu_t, self.fan1, self.fan2):
             tl.addWidget(m)
         tl.addWidget(self.turbo, 0, Qt.AlignLeft)
-        self.switches = SettingsBox(win)
 
         cols = QGridLayout()
         cols.setHorizontalSpacing(12)
@@ -451,10 +453,9 @@ class DashboardPage(Page):
         self.net_form = InfoForm()
         sl.addLayout(self.net_form)
 
-        boxes = (top, self.switches, self.temps_box, cpu, gpu, mem, bat, disk, system)
+        boxes = (top, self.temps_box, cpu, gpu, mem, bat, disk, system)
         for i, box in enumerate(boxes):
-            if box is not self.switches:
-                box.layout().addStretch()
+            box.layout().addStretch()
             cols.addWidget(box, i // 2, i % 2)
         cols.setColumnStretch(0, 1)
         cols.setColumnStretch(1, 1)
@@ -575,8 +576,10 @@ class DashboardPage(Page):
             self.net_form.set(iface, addr, f"IP ({iface})")
 
 
-class SettingsBox(QGroupBox):
-    """Hardware switches plus the app's own start-up options."""
+class SettingsPage(Page):
+    """Hardware switches plus the app's own start-up options. Acts immediately."""
+    title = "Settings"
+    icon = ("systemsettings", "preferences-system")
     LABELS = {
         "fnlock": "Fn lock (F-keys act as media keys)",
         "winlock": "Windows key enabled",
@@ -584,9 +587,11 @@ class SettingsBox(QGroupBox):
     }
 
     def __init__(self, win):
-        super().__init__("Settings")
+        super().__init__()
         self.win = win
-        bl = QVBoxLayout(self)
+        lay = QVBoxLayout(self)
+        hw = QGroupBox("Keyboard && touchpad")
+        bl = QVBoxLayout(hw)
         bl.setSpacing(10)
         self.checks = {}
         for key, text in self.LABELS.items():
@@ -598,15 +603,21 @@ class SettingsBox(QGroupBox):
         self.kbbl = QCheckBox("Keyboard backlight")
         self.kbbl.clicked.connect(self._set_kb)
         bl.addWidget(self.kbbl)
+        lay.addWidget(hw)
+
+        app = QGroupBox("App")
+        al = QVBoxLayout(app)
+        al.setSpacing(10)
         self.login = QCheckBox("Start at login (in the tray)")
         self.login.setChecked(os.path.exists(AUTOSTART))
         self.login.toggled.connect(self._set_autostart)
-        bl.addWidget(self.login)
+        al.addWidget(self.login)
         self.on_start = QCheckBox("Re-apply lighting when the app starts")
         self.on_start.setChecked(as_bool(win.settings.value("apply_on_start", "false")))
         self.on_start.toggled.connect(lambda on: win.settings.setValue("apply_on_start", on))
-        bl.addWidget(self.on_start)
-        bl.addStretch()
+        al.addWidget(self.on_start)
+        lay.addWidget(app)
+        lay.addStretch()
 
     def _set_autostart(self, on):
         try:
@@ -743,7 +754,7 @@ class BarEditor(QGroupBox):
 
 class KeyboardPage(Page):
     title = "Keyboard lighting"
-    icon = ("input-keyboard", "preferences-desktop-keyboard")
+    icon = ("preferences-desktop-keyboard", "input-keyboard")
     has_apply = True
     DEFAULTS = {"effect": 0, "areas": [0xFF0000, 0x0000FF, 0x00FF00, 0xFF8000], "same": False,
                 "brightness": miwmi.KBD_BRIGHTNESS_MAX, "speed": 2}
@@ -834,7 +845,7 @@ class KeyboardPage(Page):
 
 class AmbientLightsPage(Page):
     title = "Ambient lights"
-    icon = ("settings-configure-symbolic", "configure")
+    icon = ("color-management", "preferences-desktop-color")
     has_apply = True
 
     def __init__(self, win):
@@ -889,91 +900,134 @@ class AmbientLightsPage(Page):
         self.changed.emit()
 
 
-class AdvancedPage(Page):
-    title = "Advanced"
-    icon = ("utilities-terminal-symbolic", "utilities-terminal")
+class MacroKeysPage(Page):
+    """Status and mapping of the five macro keys (the mikeysd service)."""
+    title = "Macro keys"
+    icon = ("preferences-desktop-keyboard-shortcut", "preferences-desktop-keyboard")
+    SERVICE = "mikeysd"
 
     def __init__(self, win):
         super().__init__()
         self.win = win
         lay = QVBoxLayout(self)
 
-        raw = QGroupBox("Raw command (hex)")
-        rl = QGridLayout(raw)
-        self.fields = []
-        for col, (name, default) in enumerate([("cmd", "FA00"), ("func", "0102"), ("arg0", "0"),
-                                               ("arg1", "0"), ("arg2", "0"), ("arg3", "0"),
-                                               ("arg4", "0")]):
-            rl.addWidget(QLabel(name), 0, col)
-            e = QLineEdit(default)
-            e.setMaximumWidth(90)
-            rl.addWidget(e, 1, col)
-            self.fields.append(e)
-        send = QPushButton("Send")
-        send.clicked.connect(self._send_raw)
-        rl.addWidget(send, 1, len(self.fields))
-        lay.addWidget(raw)
+        svc = QGroupBox("Service")
+        sl = QHBoxLayout(svc)
+        self.state = QLabel("–")
+        self.svc_btn = QPushButton()
+        self.svc_btn.clicked.connect(self._start_or_restart)
+        sl.addWidget(self.state, 1)
+        sl.addWidget(self.svc_btn)
+        lay.addWidget(svc)
 
-        probe = QGroupBox("Zone probe: light one LEDZ zone in one colour")
-        pl = QHBoxLayout(probe)
-        self.p_zone = QSpinBox()
-        self.p_zone.setRange(0, 255)
-        self.p_zone.setValue(1)
-        self.p_eff = QSpinBox()
-        self.p_eff.setRange(0, 255)
-        self.p_colour = ColourCombo(0xFF0000)
-        go = QPushButton("Light it")
-        go.clicked.connect(self._probe)
-        for w in (QLabel("LEDZ"), self.p_zone, QLabel("effect"), self.p_eff, self.p_colour, go):
-            pl.addWidget(w)
-        pl.addStretch()
-        lay.addWidget(probe)
+        keys = QGroupBox("Keys (top to bottom)")
+        self.form = QFormLayout(keys)
+        self.rows = []
+        for i in range(1, keysd.NUM_KEYS + 1):
+            v = QLabel("–")
+            f = v.font()
+            f.setBold(True)
+            v.setFont(f)
+            self.form.addRow(f"Key {i}", v)
+            self.rows.append(v)
+        lay.addWidget(keys)
 
-        self.swap = QCheckBox("Swap red/blue in colour commands (if colours come out wrong)")
-        self.swap.setChecked(as_bool(win.settings.value("swap_rb", "false")))
-        self.swap.toggled.connect(self._swap)
-        lay.addWidget(self.swap)
+        bind = QHBoxLayout()
+        hint = QLabel("Give the keys actions in your desktop's shortcut settings. "
+                      "In KDE they can show up as “Tools” or “Launch5”–“Launch8”.")
+        hint.setWordWrap(True)
+        self.open_btn = QPushButton(theme_icon("preferences-desktop-keyboard-shortcut"),
+                                    "Open shortcut settings")
+        self.open_btn.clicked.connect(self._open_shortcuts)
+        self.open_btn.setVisible(self._shortcut_cmd() is not None)
+        bind.addWidget(hint, 1)
+        bind.addWidget(self.open_btn, 0, Qt.AlignTop)
+        lay.addLayout(bind)
 
+        remap = QLabel(f"To send different keys, edit <code>{keysd.CONFIG}</code> (evdev names, "
+                       "e.g. <code>3 = KEY_F20</code>, or <code>none</code>), then press Restart.")
+        remap.setWordWrap(True)
+        remap.setStyleSheet("color: palette(placeholder-text);")
+        lay.addWidget(remap)
+        lay.addStretch()
+
+    def showEvent(self, e):
+        self.refresh()
+        super().showEvent(e)
+
+    @staticmethod
+    def _systemctl(*args):
+        try:
+            return subprocess.run(["systemctl", *args], capture_output=True, text=True,
+                                  timeout=5).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    def refresh(self):
+        active = self._systemctl("is-active", self.SERVICE)
+        enabled = self._systemctl("is-enabled", self.SERVICE)
+        if active == "active":
+            text = "Running" + ("" if enabled == "enabled" else " (not started at boot)")
+        elif enabled in ("", "not-found"):
+            text = "Not installed"
+        else:
+            text = "Stopped: the keys do nothing until it runs"
+        self.state.setText(text)
+        self.svc_btn.setText("Restart" if active == "active" else "Start")
+        self.svc_btn.setEnabled(enabled not in ("", "not-found"))
+        mapping = keysd.load_map()
+        for i, lab in enumerate(self.rows, 1):
+            name = mapping.get(i)
+            lab.setText(name[4:] if name and name.startswith("KEY_") else name or "nothing")
+
+    def _start_or_restart(self):
+        verb = "restart" if self.svc_btn.text() == "Restart" else "start"
+        # systemctl asks polkit, which shows the desktop's password prompt.
+        self.win.log(f"systemctl {verb} {self.SERVICE}")
+        proc = subprocess.Popen(["systemctl", verb, self.SERVICE])
+        QTimer.singleShot(0, lambda: self._wait(proc))
+
+    def _wait(self, proc):
+        if proc.poll() is None:
+            QTimer.singleShot(300, lambda: self._wait(proc))
+            return
+        if proc.returncode:
+            self.win.log(f"systemctl failed (exit {proc.returncode})")
+        self.refresh()
+
+    @staticmethod
+    def _shortcut_cmd():
+        for cmd in (["systemsettings", "kcm_keys"], ["kcmshell6", "kcm_keys"]):
+            if shutil.which(cmd[0]):
+                return cmd
+        return None
+
+    def _open_shortcuts(self):
+        subprocess.Popen(self._shortcut_cmd(), start_new_session=True)
+
+
+class LogPage(Page):
+    """What the app did and any errors. Low-level tools (raw commands, zone tests)
+    live in the CLI: `miwmi raw`, `miwmi light`, tools/kbdtest."""
+    title = "Log"
+    icon = ("utilities-terminal",)
+
+    def __init__(self, win):
+        super().__init__()
+        self.win = win
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)  # fills the page edge to edge, like a terminal
         self.logbox = QPlainTextEdit()
+        self.logbox.setFrameShape(QFrame.NoFrame)
         self.logbox.setReadOnly(True)
         self.logbox.setMaximumBlockCount(2000)
         f = self.logbox.font()
         f.setFamily("monospace")
         self.logbox.setFont(f)
-        lay.addWidget(QLabel("Log"))
         lay.addWidget(self.logbox, 1)
 
-    def _swap(self, on):
-        self.win.settings.setValue("swap_rb", on)
-        self.win.dev.run(lambda w: setattr(w, "swap_rb", on))
-
-    def _send_raw(self):
-        try:
-            vals = [int(e.text() or "0", 16) for e in self.fields]
-        except ValueError:
-            self.win.log("raw: fields must be hex")
-            return
-        self.win.log("→ " + " ".join(e.text() for e in self.fields))
-
-        def done(r):
-            self.win.log(f"← status={r.status:#06x} value={r.value:#06x} "
-                         f"words={tuple(hex(x) for x in r.words)}\n  {r.raw.hex(' ')}")
-        self.win.dev.run(lambda w: w.transact(*vals), done)
-
-    def _probe(self):
-        zone, eff, rgb = self.p_zone.value(), self.p_eff.value(), self.p_colour.rgb
-        self.win.log(f"probe LEDZ={zone} effect={eff} colour=#{rgb:06X}")
-
-        def fn(w):
-            # begin -> colour -> commit; a bare LETY 0 blacks the keyboard out
-            w.write_effect(zone, w.LETY_BEGIN, 2, 5)
-            w.write_colours([rgb])
-            r = w.write_effect(zone, w.LETY_COMMIT, 2, 5)
-            return w.write_effect(zone, eff, 2, 5) if eff > 1 else r
-        self.win.dev.run(fn, lambda r: self.win.log(f"  status={r.status:#06x}"))
-
     def log(self, text):
-        self.logbox.appendPlainText(text)
+        self.logbox.appendPlainText(f"{time.strftime('%H:%M:%S')}  {text}")
 
 
 # --------------------------------------------------------------------------
@@ -1011,16 +1065,19 @@ class MainWindow(QMainWindow):
         self.resize(1000, 720)
 
         self.dash = DashboardPage(self)
-        self.system = self.dash.switches
+        self.settings_page = SettingsPage(self)
+        self.system = self.settings_page
         self.keyboard = KeyboardPage(self)
         self.ambient = AmbientLightsPage(self)
-        self.adv = AdvancedPage(self)
+        self.macros = MacroKeysPage(self)
+        self.log_page = LogPage(self)
         self.sidebar = QListWidget()
         self.sidebar.setFrameShape(QFrame.NoFrame)
         self.sidebar.setIconSize(QSize(22, 22))
         self.sidebar.setSpacing(0)
         self.stack = QStackedWidget()
-        for page in (self.dash, self.keyboard, self.ambient, self.adv):
+        for page in (self.dash, self.settings_page, self.keyboard, self.ambient, self.macros,
+                     self.log_page):
             item = QListWidgetItem(theme_icon(*page.icon), page.title)
             item.setSizeHint(QSize(0, 32))
             item.setData(Qt.UserRole, self.stack.addWidget(page))
@@ -1054,7 +1111,7 @@ class MainWindow(QMainWindow):
         self.base_status = ""
         self.status_timer.timeout.connect(lambda: self._title(self.base_status))
         # Pages own their margins, so the Dashboard's scroll area can reach the edges.
-        for page in (self.keyboard, self.ambient, self.adv):
+        for page in (self.keyboard, self.ambient, self.settings_page, self.macros):
             page.layout().setContentsMargins(*PAGE_MARGINS)
         right.addWidget(self.stack, 1)
         right.addWidget(self.bottom_line)
@@ -1179,8 +1236,6 @@ class MainWindow(QMainWindow):
         self.stack.setEnabled(True)
         self.show_status("Demo mode (no hardware)" if desc.startswith("demo") else "")
         self.log(f"backend: {desc}")
-        swap = as_bool(self.settings.value("swap_rb", "false"))
-        self.dev.run(lambda w: setattr(w, "swap_rb", swap))
         self.refresh_fan()
         self.system.refresh()
         self.timer.start(POLL_MS)
@@ -1214,7 +1269,7 @@ class MainWindow(QMainWindow):
         self.dev.run(lambda w: w.get_fan(), done)
 
     def log(self, text):
-        self.adv.log(text)
+        self.log_page.log(text)
 
     def closeEvent(self, event):
         if self.tray and self.tray.isVisible():

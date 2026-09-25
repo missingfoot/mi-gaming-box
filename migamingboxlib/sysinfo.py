@@ -6,6 +6,7 @@ static()  -> things that don't change while the app runs (OS, CPU model, GPUs, .
 live(prev) -> readings for one poll; pass the previous result back in so CPU usage
               can be worked out from the /proc/stat delta.
 """
+import functools
 import glob
 import os
 import platform
@@ -171,13 +172,31 @@ def cpu_freqs_mhz():
     return (sum(vals) // len(vals), max(vals)) if vals else (0, 0)
 
 
+@functools.lru_cache(maxsize=1)
+def chipset_name():
+    """ "Chipset (Intel HM370)" from lspci's LPC/ISA bridge, else plain "Chipset"."""
+    try:
+        out = subprocess.run(["lspci"], capture_output=True, text=True, timeout=3).stdout
+    except (OSError, subprocess.SubprocessError):
+        return "Chipset"
+    for line in out.splitlines():
+        if "ISA bridge" in line and " Chipset" in line:
+            desc = line.split(": ", 1)[1].split(" Chipset")[0].replace(" Corporation", "")
+            return f"Chipset ({desc})"
+    return "Chipset"
+
+
 def temperatures():
-    """[(group, label, °C)] from every hwmon sensor."""
-    names = {"coretemp": "CPU", "acpitz": "ACPI", "pch_cannonlake": "Chipset",
-             "nvme": "NVMe", "iwlwifi_1": "Wi-Fi"}
+    """[(group, label, °C)] from every hwmon sensor. Skips acpitz: on the TM1801 its
+    two zones just mirror the EC's CPU/GPU readings (already in the Cooling box)."""
+    names = {"coretemp": "CPU", "nvme": "NVMe", "iwlwifi_1": "Wi-Fi"}
     out = []
     for h in sorted(glob.glob("/sys/class/hwmon/hwmon*"), key=lambda p: int(p.rsplit("hwmon", 1)[1])):
         name = _read(f"{h}/name")
+        if name == "acpitz":
+            continue
+        if name.startswith("pch_"):
+            names[name] = chipset_name()
         group = names.get(name, name.split("_")[0].capitalize())
         inputs = sorted(glob.glob(f"{h}/temp*_input"),
                         key=lambda p: int(os.path.basename(p)[4:].split("_")[0]))

@@ -69,16 +69,17 @@ The Debian/Ubuntu and Fedora package names are best-effort and untested. Correct
 ## Usage
 
 - **Mi Gaming Box** (in your app menu, or `migamingbox`) is the control panel.
-  It's laid out like a settings app: a Dashboard (Turbo, fans, settings, temperatures and system info), Keyboard lighting,
-  Ambient lights and Advanced, with Defaults / Reset / Apply along the bottom for the
+  It's laid out like a settings app: a Dashboard (Turbo, fans, temperatures and system info), Settings, Keyboard lighting,
+  Ambient lights, Macro keys and Log, with Defaults / Reset / Apply along the bottom for the
   lighting pages. There's also a tray icon that turns orange in Turbo mode. No password is needed in your normal desktop session:
   polkit authorises its small root helper. Options: `--tray` starts it hidden,
-  `--demo` runs it without hardware. Dashboard → Settings has "Start at login" and
+  `--demo` runs it without hardware. The Settings page has "Start at login" and
   "Re-apply lighting when the app starts". Tick both to keep your lighting across
   reboots (the keyboard's lighting chip resets at shutdown, as on Windows, where
   GamingBox starts itself at logon to put it back).
 - **Macro keys**: `mikeysd.service` turns the five keys (top to bottom) into
-  F13–F17. Bind them in your desktop's keyboard shortcut settings (in KDE they may
+  F13–F17. The app's Macro keys page shows the service and mapping, and opens
+  KDE's shortcut settings. Bind them in your desktop's keyboard shortcut settings (in KDE they may
   show up as "Tools" / "Launch5"–"Launch8"). To remap them, edit
   `/etc/mi-gaming-box/keys.conf` (evdev key names, e.g. `3 = KEY_F20`), then run
   `sudo systemctl restart mikeysd`. `sudo mikeysd --probe` shows raw key events.
