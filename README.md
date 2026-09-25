@@ -90,15 +90,6 @@ The Debian/Ubuntu and Fedora package names are best-effort and untested. Correct
   `sudo miwmi light` to read the ambient lights' settings, and
   `sudo miwmi raw FA00 0102` for any raw command.
 
-## Help wanted
-
-- **Lighting**: if you own a TM1801, try the Keyboard lighting and Ambient lights pages
-  and open an issue with what happened. Useful details: did each keyboard area change,
-  and are the colours right or red/blue swapped.
-- **Other distros**: working package names and install steps.
-- **Kernel driver**: the natural next step is a small `platform/x86` WMI driver,
-  so the macro keys and turbo don't need acpi_call.
-
 ## Other models
 
 The firmware interface looks like a Quanta design and may exist on other Xiaomi
