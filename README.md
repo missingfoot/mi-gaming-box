@@ -17,7 +17,7 @@ interface was worked out is documented in [FINDINGS.md](FINDINGS.md).
 |---|---|
 | Turbo fan mode | ✅ tested |
 | CPU / GPU temperature, both fan speeds | ✅ tested |
-| 5 macro keys → F13–F17, bindable in your desktop's shortcut settings | ✅ tested |
+| 5 macro keys: shortcuts, typed text, commands, multi-step macros | ✅ keys tested, editor new |
 | Fn lock, Windows key, touchpad, power-button LED | ✅ reading tested, switching expected to work |
 | Keyboard backlight on/off | ✅ tested |
 | Keyboard RGB (4 areas, brightness 0–5, speed, Static / Breath effects) | ✅ tested (`tools/kbdtest`) |
@@ -77,12 +77,14 @@ The Debian/Ubuntu and Fedora package names are best-effort and untested. Correct
   "Re-apply lighting when the app starts". Tick both to keep your lighting across
   reboots (the keyboard's lighting chip resets at shutdown, as on Windows, where
   GamingBox starts itself at logon to put it back).
-- **Macro keys**: `mikeysd.service` turns the five keys (top to bottom) into
-  F13–F17. The app's Macro keys page shows the service and mapping, and opens
-  KDE's shortcut settings. Bind them in your desktop's keyboard shortcut settings (in KDE they may
-  show up as "Tools" / "Launch5"–"Launch8"). To remap them, edit
-  `/etc/mi-gaming-box/keys.conf` (evdev key names, e.g. `3 = KEY_F20`), then run
-  `sudo systemctl restart mikeysd`. `sudo mikeysd --probe` shows raw key events.
+- **Macro keys**: set each of the five keys (top to bottom) on the app's Macro keys
+  page: a **shortcut** (recorded like in KDE's shortcut settings, held while you hold
+  the key, so push-to-talk works), **typed text**, a **command or script**, or a
+  **macro** (a list of shortcuts, text and pauses). `mikeysd.service` does the key
+  presses; commands run as you through the app, so keep it running (Settings →
+  Start at login). The settings live in `/etc/mi-gaming-box/macros.json`; without it
+  the old `keys.conf` (F13–F17 by default) still works. `sudo mikeysd --probe` shows
+  raw key events.
 - **CLI**: `sudo miwmi status`, `sudo miwmi turbo on|off`,
   `sudo miwmi fnlock|winlock|touchpad|powerled|kbdlight on|off`, and
   `sudo miwmi light` to read the ambient lights' settings, and

@@ -253,6 +253,10 @@ class AcpiCallWmi(MiWmi):
             raise RuntimeError(f"unexpected ACPI reply: {out!r}")
         return bytes(int(x, 16) for x in out.strip("{}").split(",") if x.strip())
 
+    def save_macros(self, cfg):
+        from migamingboxlib import macros
+        return macros.save(cfg)
+
     def read_ec(self, name):
         """Read a named EC field from the DSDT (e.g. LETY) - read-only diagnostics."""
         if not name.isalnum() or len(name) > 4:
@@ -307,6 +311,15 @@ class HelperWmi(MiWmi):
             raise RuntimeError(resp["error"])
         return bytes.fromhex(resp["reply"])
 
+    def save_macros(self, cfg):
+        with self.lock:
+            self.proc.stdin.write(json.dumps({"macros": cfg}) + "\n")
+            self.proc.stdin.flush()
+            resp = self._readline()
+        if "error" in resp:
+            raise RuntimeError(resp["error"])
+        return resp["saved"]
+
     def close(self):
         if self.proc.poll() is None:
             self.proc.stdin.close()
@@ -320,6 +333,12 @@ class MockWmi(MiWmi):
         self.state = {(F_MISC, k): 0 for k in MISC.values()}
         self.state[(F_FAN, 0)] = 0
         self.state[(F_KBD_BACKLIGHT, 0)] = 0  # KBBL 0 = backlight on
+        self.macros = None  # demo: saved macro config lives only in memory
+
+    def save_macros(self, cfg):
+        from migamingboxlib import macros
+        self.macros = macros.validate(cfg)
+        return self.macros
 
     def _xfer(self, buf):
         cmd, func, a0, a1 = struct.unpack_from("<HHII", buf)
@@ -340,7 +359,8 @@ class MockWmi(MiWmi):
 
 
 def serve():
-    """JSON-lines loop: {"buf": hex32} -> {"reply": hex32} | {"error": str}."""
+    """JSON-lines loop: {"buf": hex32} -> {"reply": hex32} | {"error": str};
+    {"macros": cfg} -> {"saved": cfg} (writes /etc/mi-gaming-box/macros.json)."""
     try:
         dev = AcpiCallWmi()
         print(json.dumps({"ready": True}), flush=True)
@@ -351,7 +371,13 @@ def serve():
         if not line.strip():
             continue
         try:
-            buf = bytes.fromhex(json.loads(line)["buf"])
+            req = json.loads(line)
+            if "macros" in req:
+                # Validated in macros.save before anything is written.
+                from migamingboxlib import macros
+                print(json.dumps({"saved": macros.save(req["macros"])}), flush=True)
+                continue
+            buf = bytes.fromhex(req["buf"])
             if len(buf) != 32:
                 raise ValueError("buffer must be 32 bytes")
             print(json.dumps({"reply": dev._xfer(buf).hex()}), flush=True)

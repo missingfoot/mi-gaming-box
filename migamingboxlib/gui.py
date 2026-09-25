@@ -5,8 +5,10 @@
 Runs as your user. Hardware access goes through a small root helper
 (`miwmi.py serve`), started once via pkexec. Use --demo to try it without hardware.
 """
+import copy
 import os
 import queue
+import shlex
 import shutil
 import subprocess
 import sys
@@ -18,14 +20,14 @@ from PySide6.QtCore import QEvent, QObject, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPalette, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QColorDialog, QComboBox, QFormLayout, QFrame, QGridLayout,
-    QGroupBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow,
-    QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSlider,
-    QStackedWidget,
+    QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar,
+    QPushButton, QScrollArea, QSlider, QSpinBox, QStackedWidget, QToolButton,
     QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 
-from migamingboxlib import keysd, miwmi, sysinfo
+from migamingboxlib import macros, miwmi, sysinfo
 
 APP_NAME = "Mi Gaming Box"
 POLL_MS = 2000
@@ -900,57 +902,456 @@ class AmbientLightsPage(Page):
         self.changed.emit()
 
 
+
+QT_MODS = [(Qt.MetaModifier, "KEY_LEFTMETA"), (Qt.ControlModifier, "KEY_LEFTCTRL"),
+           (Qt.AltModifier, "KEY_LEFTALT"), (Qt.ShiftModifier, "KEY_LEFTSHIFT")]
+MODIFIER_QT_KEYS = {Qt.Key_Control, Qt.Key_Alt, Qt.Key_Shift, Qt.Key_Meta, Qt.Key_Super_L,
+                    Qt.Key_Super_R, Qt.Key_AltGr}
+
+
+def evdev_name(code):
+    """KEY_* name for an evdev code (None if unknown)."""
+    from evdev import ecodes
+    names = ecodes.KEY.get(code)
+    if isinstance(names, (list, tuple)):
+        names = next((n for n in names if "MIN_INTERESTING" not in n), names[0])
+    return names if isinstance(names, str) and names.startswith("KEY_") else None
+
+
+def block_kde_shortcuts(block):
+    """Pause KDE's global shortcuts while recording, as KDE's own shortcut editor does,
+    so combos like Meta+E reach us instead of running."""
+    try:
+        from PySide6.QtDBus import QDBusConnection, QDBusInterface
+        QDBusInterface("org.kde.kglobalaccel", "/kglobalaccel", "org.kde.KGlobalAccel",
+                       QDBusConnection.sessionBus()).call("blockGlobalShortcuts", block)
+    except Exception:
+        pass
+
+
+class ShortcutButton(QPushButton):
+    """KDE-style shortcut recorder: click, press the combo. Records the physical key
+    (evdev code = native scan code - 8), so it works on any keyboard layout."""
+    changed = Signal(list)
+
+    def __init__(self, keys=None):
+        super().__init__()
+        self.keys = list(keys or [])
+        self.recording = False
+        self.setCheckable(True)
+        self.clicked.connect(self._toggle)
+        self._show()
+
+    def set_keys(self, keys):
+        self.keys = list(keys or [])
+        self._show()
+
+    def _show(self):
+        self.setChecked(self.recording)
+        self.setText("Input…" if self.recording
+                     else macros.combo_label(self.keys) if self.keys else "None")
+
+    def _toggle(self, on):
+        self._record(on)
+
+    def _record(self, on):
+        if on == self.recording:
+            return
+        self.recording = on
+        self.held_mods = []
+        block_kde_shortcuts(on)
+        if on:
+            self.grabKeyboard()
+        else:
+            self.releaseKeyboard()
+        self._show()
+
+    def _mods(self, event):
+        return [name for flag, name in QT_MODS if event.modifiers() & flag]
+
+    def keyPressEvent(self, e):
+        if not self.recording:
+            return super().keyPressEvent(e)
+        mods = self._mods(e)
+        if e.key() in MODIFIER_QT_KEYS:
+            self.held_mods = mods
+            self.setText(macros.combo_label(mods) + "+…" if mods else "Input…")
+            return
+        name = evdev_name(e.nativeScanCode() - 8)
+        if name:
+            self.keys = mods + [name]
+            self._record(False)
+            self.changed.emit(self.keys)
+
+    def keyReleaseEvent(self, e):
+        # Modifiers pressed and released on their own (e.g. just Meta) are a shortcut too.
+        if self.recording and e.key() in MODIFIER_QT_KEYS and self.held_mods \
+                and not self._mods(e):
+            self.keys = self.held_mods
+            self._record(False)
+            self.changed.emit(self.keys)
+            return
+        super().keyReleaseEvent(e)
+
+    def focusOutEvent(self, e):
+        self._record(False)
+        super().focusOutEvent(e)
+
+
+class ShortcutEditor(QWidget):
+    """Recorder button, a menu of special keys (media etc.) and a clear button."""
+    changed = Signal(list)
+
+    def __init__(self, keys=None):
+        super().__init__()
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.button = ShortcutButton(keys)
+        self.button.changed.connect(self.changed)
+        special = QToolButton()
+        special.setText("Special key")
+        special.setPopupMode(QToolButton.InstantPopup)
+        menu = QMenu(special)
+        for name in macros.SPECIAL_KEYS:
+            menu.addAction(macros.key_label(name), lambda n=name: self._set([n]))
+        special.setMenu(menu)
+        clear = QToolButton()
+        clear.setIcon(theme_icon("edit-clear", "edit-delete"))
+        if clear.icon().isNull():
+            clear.setText("Clear")
+        clear.setToolTip("Clear")
+        clear.clicked.connect(lambda: self._set([]))
+        lay.addWidget(self.button, 1)
+        lay.addWidget(special)
+        lay.addWidget(clear)
+
+    @property
+    def keys(self):
+        return self.button.keys
+
+    def set_keys(self, keys):
+        self.button.set_keys(keys)
+
+    def _set(self, keys):
+        self.button.set_keys(keys)
+        self.changed.emit(keys)
+
+
+class StepDialog(QDialog):
+    """Add or edit one macro step: a shortcut, some text, or a pause."""
+
+    def __init__(self, parent, step=None):
+        super().__init__(parent)
+        self.setWindowTitle("Macro step")
+        lay = QFormLayout(self)
+        self.kind = QComboBox()
+        for label, key in (("Press shortcut", "keys"), ("Type text", "text"), ("Wait", "delay")):
+            self.kind.addItem(label, key)
+        lay.addRow("Step", self.kind)
+        self.stack = QStackedWidget()
+        self.shortcut = ShortcutEditor()
+        self.text = QLineEdit()
+        self.delay = QSpinBox()
+        self.delay.setRange(0, macros.MAX_DELAY_MS)
+        self.delay.setSingleStep(100)
+        self.delay.setSuffix(" ms")
+        self.delay.setValue(200)
+        for w in (self.shortcut, self.text, self.delay):
+            self.stack.addWidget(w)
+        lay.addRow(self.stack)
+        self.kind.currentIndexChanged.connect(self.stack.setCurrentIndex)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addRow(buttons)
+        if step:
+            kind = next(iter(step))
+            self.kind.setCurrentIndex(self.kind.findData(kind))
+            {"keys": lambda v: self.shortcut.set_keys(v), "text": self.text.setText,
+             "delay": self.delay.setValue}[kind](step[kind])
+
+    def step(self):
+        kind = self.kind.currentData()
+        if kind == "keys":
+            return {"keys": self.shortcut.keys} if self.shortcut.keys else None
+        if kind == "text":
+            return {"text": self.text.text()} if self.text.text() else None
+        return {"delay": self.delay.value()}
+
+
+def step_label(step):
+    if "keys" in step:
+        return f"Press {macros.combo_label(step['keys'])}"
+    if "text" in step:
+        return f"Type “{step['text']}”"
+    return f"Wait {step['delay']} ms"
+
+
 class MacroKeysPage(Page):
-    """Status and mapping of the five macro keys (the mikeysd service)."""
+    """Edit what each of the five macro keys does (see macros.py / mikeysd)."""
     title = "Macro keys"
     icon = ("preferences-desktop-keyboard-shortcut", "preferences-desktop-keyboard")
+    has_apply = True
     SERVICE = "mikeysd"
+    ACTION_LABELS = [("Nothing", "none"), ("Shortcut", "shortcut"), ("Type text", "text"),
+                     ("Run command", "command"), ("Macro", "macro")]
 
     def __init__(self, win):
         super().__init__()
         self.win = win
+        self.saved = macros.load()
+        self.cfg = copy.deepcopy(self.saved)
+        self.loading = False
         lay = QVBoxLayout(self)
 
-        svc = QGroupBox("Service")
-        sl = QHBoxLayout(svc)
+        # --- service status, one line
+        svc = QHBoxLayout()
         self.state = QLabel("–")
         self.svc_btn = QPushButton()
         self.svc_btn.clicked.connect(self._start_or_restart)
-        sl.addWidget(self.state, 1)
-        sl.addWidget(self.svc_btn)
-        lay.addWidget(svc)
+        svc.addWidget(self.state, 1)
+        svc.addWidget(self.svc_btn)
+        lay.addLayout(svc)
 
-        keys = QGroupBox("Keys (top to bottom)")
-        self.form = QFormLayout(keys)
-        self.rows = []
-        for i in range(1, keysd.NUM_KEYS + 1):
-            v = QLabel("–")
-            f = v.font()
-            f.setBold(True)
-            v.setFont(f)
-            self.form.addRow(f"Key {i}", v)
-            self.rows.append(v)
-        lay.addWidget(keys)
+        # --- keys on the left, editor on the right (like KDE's Shortcuts page)
+        body = QHBoxLayout()
+        self.list = QListWidget()
+        self.list.setFixedWidth(260)
+        self.list.setIconSize(QSize(22, 22))
+        for i in range(1, macros.NUM_KEYS + 1):
+            item = QListWidgetItem()
+            item.setSizeHint(QSize(0, 44))
+            self.list.addItem(item)
+        self.list.currentRowChanged.connect(self._select)
+        body.addWidget(self.list)
 
-        bind = QHBoxLayout()
-        hint = QLabel("Give the keys actions in your desktop's shortcut settings. "
-                      "In KDE they can show up as “Tools” or “Launch5”–“Launch8”.")
-        hint.setWordWrap(True)
+        ed = QVBoxLayout()
+        form = QFormLayout()
+        self.action = QComboBox()
+        for label, key in self.ACTION_LABELS:
+            self.action.addItem(label, key)
+        self.action.currentIndexChanged.connect(self._action_changed)
+        form.addRow("Action", self.action)
+        ed.addLayout(form)
+        self.stack = QStackedWidget()
+        ed.addWidget(self.stack, 1)
+
+        def page(widget, hint):
+            w = QWidget()
+            v = QVBoxLayout(w)
+            v.setContentsMargins(0, 0, 0, 0)
+            if widget is not None:
+                v.addWidget(widget)
+            h = QLabel(hint)
+            h.setWordWrap(True)
+            h.setStyleSheet("color: palette(placeholder-text);")
+            v.addWidget(h)
+            v.addStretch()
+            self.stack.addWidget(w)
+            return h
+
+        page(None, "The key does nothing.")
+        self.shortcut = ShortcutEditor()
+        self.shortcut.changed.connect(lambda keys: self._update(keys=keys))
+        page(self.shortcut, "Click the button, then press the combination. The shortcut is "
+                            "held for as long as you hold the macro key, so push-to-talk works.")
+        self.text = QPlainTextEdit()
+        self.text.setMaximumHeight(120)
+        self.text.textChanged.connect(lambda: self._update(text=self.text.toPlainText()))
+        self.text_hint = page(self.text, "")
+        cmd = QWidget()
+        cl = QHBoxLayout(cmd)
+        cl.setContentsMargins(0, 0, 0, 0)
+        self.command = QLineEdit()
+        self.command.setPlaceholderText("e.g. konsole, or /path/to/script.sh")
+        self.command.textChanged.connect(lambda t: self._update(command=t))
+        browse = QPushButton(theme_icon("document-open"), "Browse…")
+        browse.clicked.connect(self._browse)
+        cl.addWidget(self.command, 1)
+        cl.addWidget(browse)
+        page(cmd, "Runs as you, through Mi Gaming Box, so the app needs to be running "
+                  "(Settings → Start at login).")
+        mac = QWidget()
+        ml = QHBoxLayout(mac)
+        ml.setContentsMargins(0, 0, 0, 0)
+        self.steps = QListWidget()
+        self.steps.itemDoubleClicked.connect(lambda _: self._edit_step())
+        ml.addWidget(self.steps, 1)
+        sb = QVBoxLayout()
+        for text, icon, fn in (("Add…", "list-add", self._add_step),
+                               ("Edit…", "document-edit", self._edit_step),
+                               ("Remove", "list-remove", self._remove_step),
+                               ("Move up", "go-up", lambda: self._move_step(-1)),
+                               ("Move down", "go-down", lambda: self._move_step(1))):
+            b = QPushButton(theme_icon(icon), text)
+            b.clicked.connect(fn)
+            sb.addWidget(b)
+        sb.addStretch()
+        ml.addLayout(sb)
+        page(mac, "Steps run in order when you press the key: shortcuts, typed text and waits.")
+        body.addLayout(ed, 1)
+        lay.addLayout(body, 1)
+
+        foot = QHBoxLayout()
+        tip = QLabel("Tip: press a macro key to jump to it.")
+        tip.setStyleSheet("color: palette(placeholder-text);")
+        foot.addWidget(tip, 1)
         self.open_btn = QPushButton(theme_icon("preferences-desktop-keyboard-shortcut"),
-                                    "Open shortcut settings")
+                                    "Open system shortcut settings")
         self.open_btn.clicked.connect(self._open_shortcuts)
         self.open_btn.setVisible(self._shortcut_cmd() is not None)
-        bind.addWidget(hint, 1)
-        bind.addWidget(self.open_btn, 0, Qt.AlignTop)
-        lay.addLayout(bind)
+        foot.addWidget(self.open_btn)
+        lay.addLayout(foot)
 
-        remap = QLabel(f"To send different keys, edit <code>{keysd.CONFIG}</code> (evdev names, "
-                       "e.g. <code>3 = KEY_F20</code>, or <code>none</code>), then press Restart.")
-        remap.setWordWrap(True)
-        remap.setStyleSheet("color: palette(placeholder-text);")
-        lay.addWidget(remap)
-        lay.addStretch()
+        self._refresh_list()
+        self.list.setCurrentRow(0)
 
+    # --- current key -------------------------------------------------------
+    def _key(self):
+        return str(self.list.currentRow() + 1)
+
+    def _cur(self):
+        return self.cfg["keys"][self._key()]
+
+    def _select(self, row):
+        if row < 0:
+            return
+        a = self._cur()
+        self.loading = True
+        self.action.setCurrentIndex(self.action.findData(a["action"]))
+        self.stack.setCurrentIndex(self.action.currentIndex())
+        self.shortcut.set_keys(a.get("keys", []))
+        self.text.setPlainText(a.get("text", ""))
+        self.command.setText(a.get("command", ""))
+        self._fill_steps(a.get("steps", []))
+        self.loading = False
+        self._text_warning()
+
+    def _action_changed(self, i):
+        self.stack.setCurrentIndex(i)
+        if self.loading:
+            return
+        act = self.action.currentData()
+        # Keep what was typed in the other editors, so switching back and forth is harmless.
+        a = {"action": act}
+        if act == "shortcut":
+            a["keys"] = self.shortcut.keys
+        elif act == "text":
+            a["text"] = self.text.toPlainText()
+        elif act == "command":
+            a["command"] = self.command.text()
+        elif act == "macro":
+            a["steps"] = self._cur().get("steps", [])
+        self.cfg["keys"][self._key()] = a
+        self._changed()
+
+    def _update(self, **kw):
+        if self.loading:
+            return
+        a = self._cur()
+        for k, v in kw.items():
+            if k in {"shortcut": ("keys",), "text": ("text",), "command": ("command",),
+                     "macro": ("steps",)}.get(a["action"], ()):
+                a[k] = v
+        self._text_warning()
+        self._changed()
+
+    def _text_warning(self):
+        bad = macros.untypable(self.text.toPlainText(), self.cfg.get("layout", "us"))
+        layout = self.cfg.get("layout", "us").upper()
+        self.text_hint.setText(
+            f"Typed out when you press the key, using the {layout} keyboard layout."
+            + (f" These characters can't be typed and will be skipped: {' '.join(bad)}"
+               if bad else ""))
+
+    # --- macro steps ----------------------------------------------------------
+    def _fill_steps(self, steps):
+        self.steps.clear()
+        for st in steps:
+            self.steps.addItem(step_label(st))
+
+    def _set_steps(self, steps, row=None):
+        self._cur()["steps"] = steps
+        self._fill_steps(steps)
+        if row is not None:
+            self.steps.setCurrentRow(row)
+        self._changed()
+
+    def _add_step(self):
+        d = StepDialog(self)
+        if d.exec() and d.step():
+            steps = self._cur().get("steps", []) + [d.step()]
+            self._set_steps(steps, len(steps) - 1)
+
+    def _edit_step(self):
+        r = self.steps.currentRow()
+        steps = list(self._cur().get("steps", []))
+        if r < 0:
+            return
+        d = StepDialog(self, steps[r])
+        if d.exec() and d.step():
+            steps[r] = d.step()
+            self._set_steps(steps, r)
+
+    def _remove_step(self):
+        r = self.steps.currentRow()
+        steps = list(self._cur().get("steps", []))
+        if r >= 0:
+            del steps[r]
+            self._set_steps(steps, min(r, len(steps) - 1))
+
+    def _move_step(self, d):
+        r = self.steps.currentRow()
+        steps = list(self._cur().get("steps", []))
+        if 0 <= r and 0 <= r + d < len(steps):
+            steps[r], steps[r + d] = steps[r + d], steps[r]
+            self._set_steps(steps, r + d)
+
+    # --- list, apply ----------------------------------------------------------
+    def _refresh_list(self):
+        for i in range(macros.NUM_KEYS):
+            a = self.cfg["keys"][str(i + 1)]
+            self.list.item(i).setText(f"Key {i + 1}\n{macros.summary(a)}")
+
+    def _changed(self):
+        self._refresh_list()
+        self.changed.emit()
+
+    def dirty(self):
+        return self.cfg != self.saved
+
+    def reset(self):
+        self.cfg = copy.deepcopy(self.saved)
+        self._select(self.list.currentRow())
+        self._changed()
+
+    def defaults(self):
+        self.cfg = macros.default()
+        self._select(self.list.currentRow())
+        self._changed()
+
+    def apply(self):
+        cfg = copy.deepcopy(self.cfg)
+        cfg["layout"] = macros.detect_layout()
+        try:
+            macros.validate(cfg)
+        except ValueError as e:
+            QMessageBox.warning(self, APP_NAME, f"Can't save the macro keys:\n\n{e}")
+            return
+
+        def done(saved):
+            self.saved = saved
+            self.cfg = copy.deepcopy(saved)
+            self._changed()
+            self.win.log("macro keys saved")
+        self.win.dev.run(lambda w: w.save_macros(cfg), done)
+
+    def flash(self, key):
+        """Jump to the key that was just pressed (edits of other keys are kept)."""
+        if 1 <= key <= macros.NUM_KEYS and self.isVisible():
+            self.list.setCurrentRow(key - 1)
+
+    # --- service -------------------------------------------------------------
     def showEvent(self, e):
         self.refresh()
         super().showEvent(e)
@@ -966,19 +1367,27 @@ class MacroKeysPage(Page):
     def refresh(self):
         active = self._systemctl("is-active", self.SERVICE)
         enabled = self._systemctl("is-enabled", self.SERVICE)
-        if active == "active":
-            text = "Running" + ("" if enabled == "enabled" else " (not started at boot)")
-        elif enabled in ("", "not-found"):
-            text = "Not installed"
+        # A service stuck in a crash loop flips between activating and active, so
+        # also count restarts: any restart since it started means it's crashing.
+        restarts = self._systemctl("show", "-p", "NRestarts", "--value", self.SERVICE)
+        crashing = restarts.isdigit() and int(restarts) > 0
+        if enabled in ("", "not-found"):
+            text = "Macro key service: not installed"
+        elif active == "failed" or crashing:
+            text = ("Macro key service: keeps crashing. See "
+                    "<code>journalctl -u mikeysd</code>.")
+        elif active == "active":
+            text = "Macro key service: running" + ("" if enabled == "enabled"
+                                                   else " (not started at boot)")
+        elif active in ("activating", "reloading"):
+            text = "Macro key service: starting…"
+            QTimer.singleShot(1500, self.refresh)
         else:
-            text = "Stopped: the keys do nothing until it runs"
+            text = "Macro key service: stopped. The keys do nothing until it runs."
         self.state.setText(text)
-        self.svc_btn.setText("Restart" if active == "active" else "Start")
-        self.svc_btn.setEnabled(enabled not in ("", "not-found"))
-        mapping = keysd.load_map()
-        for i, lab in enumerate(self.rows, 1):
-            name = mapping.get(i)
-            lab.setText(name[4:] if name and name.startswith("KEY_") else name or "nothing")
+        self.svc_btn.setText("Restart" if active in ("active", "activating", "failed")
+                             or crashing else "Start")
+        self.svc_btn.setVisible(enabled not in ("", "not-found"))
 
     def _start_or_restart(self):
         verb = "restart" if self.svc_btn.text() == "Restart" else "start"
@@ -994,6 +1403,13 @@ class MacroKeysPage(Page):
         if proc.returncode:
             self.win.log(f"systemctl failed (exit {proc.returncode})")
         self.refresh()
+        QTimer.singleShot(4000, self.refresh)  # a crash shows up after RestartSec
+
+    def _browse(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Choose a program or script",
+                                              os.path.expanduser("~"))
+        if path:
+            self.command.setText(shlex.quote(path))
 
     @staticmethod
     def _shortcut_cmd():
@@ -1004,6 +1420,48 @@ class MacroKeysPage(Page):
 
     def _open_shortcuts(self):
         subprocess.Popen(self._shortcut_cmd(), start_new_session=True)
+
+
+class MacroListener(QObject):
+    """Connects to mikeysd's socket. Runs "command" actions as the user and tells the
+    Macro keys page which key was pressed. Reconnects if the service restarts."""
+    pressed = Signal(int)
+
+    def __init__(self, win):
+        super().__init__()
+        self.win = win
+        self.cfg, self.stamp = None, None
+        self.sock = QLocalSocket(self)
+        self.sock.readyRead.connect(self._read)
+        self.sock.disconnected.connect(lambda: self.retry.start(3000))
+        self.sock.errorOccurred.connect(lambda _: self.retry.start(3000))
+        self.retry = QTimer(self, singleShot=True)
+        self.retry.timeout.connect(self._connect)
+        self._connect()
+
+    def _connect(self):
+        if self.sock.state() == QLocalSocket.UnconnectedState:
+            self.sock.connectToServer(macros.SOCKET)
+
+    def _read(self):
+        while self.sock.canReadLine():
+            parts = bytes(self.sock.readLine()).decode(errors="replace").split()
+            if len(parts) == 2 and parts[0] == "down" and parts[1].isdigit():
+                self._pressed(int(parts[1]))
+
+    def _pressed(self, key):
+        self.pressed.emit(key)
+        stamp = macros.mtime()
+        if stamp != self.stamp or self.cfg is None:
+            self.cfg, self.stamp = macros.load(), stamp
+        a = self.cfg["keys"].get(str(key), {})
+        if a.get("action") == "command" and a.get("command", "").strip():
+            self.win.log(f"key {key}: {a['command']}")
+            try:
+                subprocess.Popen(["sh", "-c", a["command"]], start_new_session=True,
+                                 stdin=subprocess.DEVNULL)
+            except OSError as e:
+                self.win.log(f"key {key}: {e}")
 
 
 class LogPage(Page):
@@ -1140,6 +1598,9 @@ class MainWindow(QMainWindow):
         self._make_tray()
 
         self._connect(demo)
+        if not demo:
+            self.listener = MacroListener(self)
+            self.listener.pressed.connect(self.macros.flash)
 
     def _connect(self, demo):
         self.dev = Device(demo)
@@ -1279,6 +1740,7 @@ class MainWindow(QMainWindow):
             self._quit()
 
     def _quit(self):
+        block_kde_shortcuts(False)  # in case we quit while recording a shortcut
         self.timer.stop()
         self.dev.close()
         QApplication.quit()
