@@ -4,6 +4,8 @@ An open-source Linux replacement for Xiaomi's Windows **GamingBox** utility on t
 **Xiaomi Mi Gaming Laptop (2018, model TM1801)**. Turbo fans, RGB lighting,
 keyboard switches and the five macro keys, which Linux otherwise ignores.
 
+![The Dashboard: Turbo mode, fans, temperatures and system info](docs/screenshots/dashboard.png)
+
 It talks to the same firmware interface the Windows app uses: a WMI data block on
 ACPI device `\_SB.MIAP`, reached through the `acpi_call` kernel module. How that
 interface was worked out is documented in [FINDINGS.md](FINDINGS.md).
@@ -18,7 +20,7 @@ interface was worked out is documented in [FINDINGS.md](FINDINGS.md).
 | Turbo fan mode | ✅ tested |
 | CPU / GPU temperature, both fan speeds | ✅ tested |
 | 5 macro keys: shortcuts, typed text, commands, multi-step macros | ✅ keys tested, editor new |
-| Fn lock, Windows key, touchpad, power-button LED | ✅ reading tested, switching expected to work |
+| Fn lock, Windows key, touchpad | ✅ reading tested, switching expected to work |
 | Keyboard backlight on/off | ✅ tested |
 | Keyboard RGB (4 areas, brightness 0–5, speed, Static / Breath effects) | ✅ tested (`tools/kbdtest`) |
 | Ambient light bars (left / right: off, steady, breathing, colour cycle) | ✅ works (TM1801) |
@@ -26,6 +28,61 @@ interface was worked out is documented in [FINDINGS.md](FINDINGS.md).
 Only tested on **TM1801** (`cat /sys/class/dmi/id/product_name`). On any other
 machine the tools refuse to touch the firmware. If you have a related Xiaomi model
 and want to experiment, see [Other models](#other-models).
+
+## The app
+
+It's laid out like KDE's System Settings, with a page for each part of the laptop.
+The lighting and macro pages have **Defaults / Reset / Apply** along the bottom, so
+nothing changes until you apply it.
+
+### Dashboard
+
+Everything at a glance, shown at the top of this page. **Turbo mode** sits with the fan
+speeds and the embedded controller's CPU/GPU temperatures. Below that are the other
+temperature sensors, CPU load and clock, both GPUs (the NVIDIA card is only read while
+it's already awake, so the page never wakes it and drains your battery), memory,
+battery health, storage and system info.
+
+### Settings
+
+![Settings: keyboard and touchpad switches, start at login](docs/screenshots/settings.png)
+
+The laptop's own switches: **Fn lock**, the **Windows key**, the **touchpad** and the
+**keyboard backlight**. They also sit in the tray menu. **Start at login** puts the app
+in the tray when you log in, and **Re-apply lighting** restores your colours after a
+reboot. The keyboard's lighting chip forgets them at shutdown, and GamingBox on Windows
+fixes this the same way.
+
+### Keyboard lighting
+
+![Keyboard lighting: four colour areas, effect, brightness and speed](docs/screenshots/keyboard-lighting.png)
+
+The keyboard has four colour areas, left to right. Pick a named colour or any custom
+colour for each, or one colour for all of them. Choose an effect (static or breathing),
+brightness and speed.
+
+### Ambient lights
+
+![Ambient lights: mode, colour list, brightness and speed per light bar](docs/screenshots/ambient-lights.png)
+
+The two light bars. Each can be **Off**, **Steady**, **Breathing** or a **Colour cycle**
+through up to 8 colours, with its own brightness and speed. Set them together or
+separately. **Defaults** brings back the colour cycle they shipped with.
+
+### Macro keys
+
+![Macro keys: the five keys and what each one does](docs/screenshots/macro-keys.png)
+
+The five extra macro keys, which do nothing on Linux out of the box. Give each one:
+
+- a **shortcut**, recorded like in KDE's shortcut settings. It's held while you hold the
+  key, so push-to-talk works.
+- some **text** to type
+- a **command or script** to run. It runs as you, never as root.
+- a **macro**: a list of shortcuts, text and pauses
+
+Press a macro key and the page jumps to it. There's also a **Log** page listing what
+the app did, which helps when something doesn't work.
 
 ## Install
 
@@ -68,15 +125,12 @@ The Debian/Ubuntu and Fedora package names are best-effort and untested. Correct
 
 ## Usage
 
-- **Mi Gaming Box** (in your app menu, or `migamingbox`) is the control panel.
-  It's laid out like a settings app: a Dashboard (Turbo, fans, temperatures and system info), Settings, Keyboard lighting,
-  Ambient lights, Macro keys and Log, with Defaults / Reset / Apply along the bottom for the
-  lighting pages. There's also a tray icon with Turbo mode and the switches. No password is needed in your normal desktop session:
-  polkit authorises its small root helper. Options: `--tray` starts it hidden,
-  `--demo` runs it without hardware. The Settings page has "Start at login" and
-  "Re-apply lighting when the app starts". Tick both to keep your lighting across
-  reboots (the keyboard's lighting chip resets at shutdown, as on Windows, where
-  GamingBox starts itself at logon to put it back).
+- **Mi Gaming Box** (in your app menu, or `migamingbox`) is the control panel, shown
+  [above](#the-app), with a tray icon for Turbo mode and the switches. No password is
+  needed in your normal desktop session: polkit authorises its small root helper.
+  Options: `--tray` starts it hidden, `--demo` runs it without hardware. Tick
+  **Start at login** and **Re-apply lighting** on the Settings page to keep your
+  lighting across reboots.
 - **Macro keys**: set each of the five keys (top to bottom) on the app's Macro keys
   page: a **shortcut** (recorded like in KDE's shortcut settings, held while you hold
   the key, so push-to-talk works), **typed text**, a **command or script**, or a
