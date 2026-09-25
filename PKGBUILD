@@ -1,6 +1,6 @@
 # Maintainer: James <claude@jamessparkes.com>
 pkgname=mi-gaming-box
-pkgver=0.1.7
+pkgver=0.1.8
 pkgrel=1
 pkgdesc="Turbo fan, lighting, keyboard switches and macro keys for the Xiaomi Mi Gaming Laptop (TM1801)"
 arch=('any')
