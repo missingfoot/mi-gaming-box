@@ -117,7 +117,10 @@ field names suggest byte8=R. Verify by eye.
 - Zones 4, 5, 6, 7 = areas A–D, **left to right**.
 - **Colour bytes: byte8 → CxZR is red** (the EC names are right; there's no R/B swap).
 - The EC clears LEDZ inside the WSAA's own 60 ms sleep, so writes don't need extra pacing.
-- **KBBL (FB00 0400) has no visible effect.** Six on/off toggles changed nothing.
+- **KBBL (FB00 0400) switches the backlight off/on** (1 = off) with the lighting intact. It
+  worked in the GUI once the keyboard was in a sane state, but six toggles in the early
+  power-on test changed nothing (KBBR read 0 then, yet the keys were lit), so it may not work
+  when the chip's state is out of sync.
 - **Keyboard LEBR is inverted: 0 = brightest, 4 = dimmest, 5 = off.** Every apply at
   "brightness 5" switched the light off, and that was the whole "goes dark" mystery.
   The driver now takes level 0 (off)–5 (brightest) and sends LEBR = 5 − level.

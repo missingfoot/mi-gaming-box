@@ -240,19 +240,16 @@ class SystemTab(QWidget):
             cb.clicked.connect(lambda on, k=key: self._set(k, on))
             bl.addWidget(cb)
             self.checks[key] = cb
+        # KBBL lives in its own WMI function (0x0400), not the 0x0300 switch set.
+        self.kbbl = QCheckBox("Keyboard backlight")
+        self.kbbl.clicked.connect(self._set_kb)
+        bl.addWidget(self.kbbl)
         note = QLabel("Values are the raw EC bits (1 = on). If a label reads inverted "
                       "on your machine, it's the firmware's sense of the bit.")
         note.setWordWrap(True)
         note.setStyleSheet("color: palette(placeholder-text);")
         bl.addWidget(note)
         lay.addWidget(box)
-
-        kb = QGroupBox("Keyboard backlight")
-        kl = QFormLayout(kb)
-        self.kbbl = QCheckBox("Backlight on")
-        self.kbbl.clicked.connect(self._set_kb)
-        kl.addRow(self.kbbl)
-        lay.addWidget(kb)
         lay.addStretch()
 
     def _set(self, key, on):
@@ -267,9 +264,11 @@ class SystemTab(QWidget):
 
         def done(res):
             sw, kb = res
-            for k, r in sw.items():
-                self.checks[k].setChecked(status_ok(r) and bool(r.value))
-            self.kbbl.setChecked(kb[0])
+            states = {k: status_ok(r) and bool(r.value) for k, r in sw.items()}
+            states["kbbl"] = kb[0]
+            for k, on in states.items():
+                (self.kbbl if k == "kbbl" else self.checks[k]).setChecked(on)
+            self.win.sync_tray_switches(states)
         self.win.dev.run(read, done)
 
 
@@ -374,7 +373,7 @@ class LightingTab(QWidget):
         self.kb_speed = slider(0, miwmi.KBD_SPEED_MAX, int(s.value("kbd/speed", 2)))
         kl.addRow("Brightness", self.kb_bright)
         kl.addRow("Speed", self.kb_speed)
-        kb_apply = QPushButton("Apply keyboard")
+        kb_apply = QPushButton("Apply")
         kb_apply.clicked.connect(self.apply_keyboard)
         kl.addRow(kb_apply)
         lay.addWidget(kb)
@@ -588,6 +587,14 @@ class MainWindow(QMainWindow):
                                           self.statusBar().showMessage(f"Error: {e}", 5000)))
         self.dev.start()
 
+    TRAY_SWITCHES = {"kbbl": "Keyboard backlight", "touchpad": "Touchpad",
+                     "fnlock": "Fn lock", "winlock": "Windows key", "powerled": "Power LED"}
+
+    def sync_tray_switches(self, states):
+        for k, on in states.items():
+            if getattr(self, "tray", None) and k in self.tray_switches:
+                self.tray_switches[k].setChecked(on)
+
     def _make_tray(self):
         self.tray = None
         if not QSystemTrayIcon.isSystemTrayAvailable():
@@ -598,6 +605,17 @@ class MainWindow(QMainWindow):
         self.tray_turbo = QAction("Turbo", menu, checkable=True)
         self.tray_turbo.triggered.connect(lambda on: self.perf._toggle(on))
         menu.addAction(self.tray_turbo)
+        menu.addSeparator()
+        self.tray_switches = {}
+        for key, text in self.TRAY_SWITCHES.items():
+            act = QAction(text, menu, checkable=True)
+            if key == "kbbl":
+                act.triggered.connect(self.system._set_kb)
+            else:
+                act.triggered.connect(lambda on, k=key: self.system._set(k, on))
+            menu.addAction(act)
+            self.tray_switches[key] = act
+        menu.aboutToShow.connect(self.system.refresh)
         menu.addSeparator()
         menu.addAction("Show", self.showNormal)
         menu.addAction("Quit", self._quit)

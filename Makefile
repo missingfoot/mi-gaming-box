@@ -7,7 +7,35 @@ LIB      = $(DESTDIR)/usr/lib/mi-gaming-box
 BIN      = $(DESTDIR)/usr/bin
 SHARE    = $(DESTDIR)/usr/share
 
-.PHONY: install uninstall
+.PHONY: install uninstall run reinstall
+
+# --- development shortcuts (run as your user, from the checkout) -----------------
+PKGVER  = $(shell sed -n 's/^pkgver=//p' PKGBUILD)
+PKGREL  = $(shell sed -n 's/^pkgrel=//p' PKGBUILD)
+PKGFILE = mi-gaming-box-$(PKGVER)-$(PKGREL)-any.pkg.tar.zst
+# The GUI process (not the root helper, whose name ends in -helper).
+GUI_PAT = [/ ]migamingbox$$
+
+# Quit any running GUI (it's single-instance, so it would swallow the new launch).
+define quit_gui
+	-pkill -u "$$USER" -f '$(GUI_PAT)'
+	@for i in 1 2 3 4 5 6 7 8 9 10; do pgrep -u "$$USER" -f '$(GUI_PAT)' >/dev/null || break; sleep 0.3; done
+endef
+
+# Quick test: run the checkout's code without installing (uses the installed root helper).
+run:
+	$(quit_gui)
+	./migamingbox
+
+# Full test: build the package from the working tree, install it, restart everything.
+reinstall:
+	makepkg -f
+	sudo pacman -U --noconfirm $(PKGFILE)
+	sudo systemctl restart mikeysd
+	$(quit_gui)
+	setsid -f migamingbox >/dev/null 2>&1
+	@echo "Installed $(PKGFILE) and restarted the app."
+
 
 install:
 	install -Dm755 migamingbox        $(BIN)/migamingbox
