@@ -516,6 +516,12 @@ def make_icon(turbo=False):
     return QIcon(pm)
 
 
+def tray_icon():
+    """The desktop theme's generic laptop icon, so the tray matches the other
+    symbolic icons there; the drawn icon is only a fallback."""
+    return QIcon.fromTheme("computer-laptop-symbolic", QIcon.fromTheme("computer-laptop", make_icon()))
+
+
 class MainWindow(QMainWindow):
     def __init__(self, demo=False):
         super().__init__()
@@ -556,7 +562,7 @@ class MainWindow(QMainWindow):
         self.tray = None
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
-        self.tray = QSystemTrayIcon(make_icon(), self)
+        self.tray = QSystemTrayIcon(tray_icon(), self)
         self.tray.setToolTip(APP_NAME)
         menu = QMenu()
         self.tray_turbo = QAction("Turbo", menu, checkable=True)
@@ -603,7 +609,6 @@ class MainWindow(QMainWindow):
             if self.tray and status_ok(r):
                 on = bool(r.value)
                 self.tray_turbo.setChecked(on)
-                self.tray.setIcon(make_icon(on))
                 f1, f2, cpu, gpu = r.words
                 self.tray.setToolTip(f"{APP_NAME}\nCPU {cpu}°C · GPU {gpu}°C\n"
                                      f"Fans {f1}/{f2} rpm · Turbo {'on' if on else 'off'}")
