@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/banner.png" alt="Mi Gaming Box running on the Xiaomi Mi Gaming Laptop" width="576"></p>
+
 # Mi Gaming Box for Linux
 
 An open-source Linux replacement for Xiaomi's Windows **GamingBox** utility on the
