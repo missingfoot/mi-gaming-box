@@ -6,6 +6,7 @@ Runs as your user. Hardware access goes through a small root helper
 (`miwmi.py serve`), started once via pkexec. Use --demo to try it without hardware.
 """
 import copy
+import html
 import os
 import queue
 import shlex
@@ -23,7 +24,7 @@ from PySide6.QtWidgets import (
     QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar,
-    QPushButton, QScrollArea, QSlider, QSpinBox, QStackedWidget, QToolButton,
+    QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QStackedWidget, QToolButton,
     QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 
@@ -233,34 +234,57 @@ class Meter(QWidget):
     warn/crit colour the value and bar amber/red; without them the bar uses the accent."""
     GOOD, WARN, CRIT = "#52c97a", "#e0a852", "#e05252"
 
-    def __init__(self, label, maximum=100, warn=None, crit=None, big=False):
+    def __init__(self, label, maximum=100, warn=None, crit=None, big=False, low_is_bad=False,
+                 note=""):
         super().__init__()
-        self.maximum, self.warn, self.crit = maximum, warn, crit
+        self.maximum, self.warn, self.crit, self.low_is_bad = maximum, warn, crit, low_is_bad
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(2)
         top = QHBoxLayout()
+        self.label, self.detail = label, ""
         self.name = QLabel(label)
+        self.name.setWordWrap(True)
         self.value = QLabel("–")
         self.value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.size = 20 if big else 14
         self.value.setStyleSheet(f"font-size: {self.size}px; font-weight: 600;")
-        top.addWidget(self.name)
-        top.addStretch()
-        top.addWidget(self.value)
+        top.addWidget(self.name, 1)
+        top.addWidget(self.value, 0, Qt.AlignRight | Qt.AlignTop)
         lay.addLayout(top)
         self.bar = QProgressBar()
         self.bar.setRange(0, 1000)
         self.bar.setTextVisible(False)
         self.bar.setFixedHeight(6)
         lay.addWidget(self.bar)
+        # Optional grey line under the bar (e.g. which drive a mount point lives on).
+        self.note = QLabel(note)
+        self.note.setWordWrap(True)
+        self.note.setStyleSheet("color: palette(placeholder-text);")
+        self.note.setVisible(bool(note))
+        lay.addWidget(self.note)
         self.colour = None
         self._colour(None)
 
     def changeEvent(self, e):
-        if e.type() == QEvent.PaletteChange:  # theme switched: recompute the track colour
+        if e.type() == QEvent.PaletteChange:  # theme switched: recompute the colours
             self._colour(self.colour)
+            self._name()
         super().changeEvent(e)
+
+    def set_detail(self, text):
+        """Subtle text after the title, e.g. a total: "RAM  15.5 GiB"."""
+        if text != self.detail:
+            self.detail = text
+            self._name()
+
+    def _name(self):
+        if not self.detail:
+            self.name.setText(self.label)
+            return
+        grey = self.palette().color(QPalette.PlaceholderText).name()
+        self.name.setText(f"{html.escape(self.label)}&nbsp;&nbsp;"
+                          f"<span style='color: {grey}'>{html.escape(self.detail)}</span>")
 
     def _colour(self, colour):
         self.colour = colour
@@ -287,6 +311,9 @@ class Meter(QWidget):
         self.bar.setValue(int(1000 * max(0.0, min(1.0, value / self.maximum))))
         if self.warn is None:
             self._colour(None)
+        elif self.low_is_bad:  # e.g. battery health: lower is worse
+            self._colour(self.CRIT if value <= self.crit else self.WARN if value <= self.warn
+                         else self.GOOD)
         else:
             self._colour(self.CRIT if value >= self.crit else self.WARN if value >= self.warn
                          else self.GOOD)
@@ -304,13 +331,16 @@ class InfoForm(QFormLayout):
         if key not in self.rows:
             v = QLabel("–")
             v.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            v.setWordWrap(True)
+            v.setWordWrap(True)  # long values wrap instead of widening the box
             self.rows[key] = v
             self.addRow(QLabel(label or key), v)
         return self.rows[key]
 
-    def set(self, key, text, label=None):
-        self.row(key, label).setText(str(text) if text not in (None, "") else "–")
+    def set(self, key, text, label=None, tooltip=None):
+        v = self.row(key, label)
+        v.setText(str(text) if text not in (None, "") else "–")
+        if tooltip:
+            v.setToolTip(tooltip)
 
 
 def section(title):
@@ -363,6 +393,7 @@ class DashboardPage(Page):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # content wraps to fit
         body = QWidget()
         scroll.setWidget(body)
         outer.addWidget(scroll)
@@ -394,7 +425,8 @@ class DashboardPage(Page):
         # --- CPU
         cpu, cl = section("Processor")
         self.cpu_form = InfoForm()
-        self.cpu_form.set("model", self.static["cpu_model"], "Model")
+        self.cpu_form.set("model", self.static["cpu_model"], "Model",
+                          tooltip=self.static["cpu_model_full"])
         self.cpu_form.set("cores", f"{self.static['cores']} cores, {self.static['threads']} threads",
                           "Cores")
         cl.addLayout(self.cpu_form)
@@ -408,9 +440,9 @@ class DashboardPage(Page):
         # --- GPUs
         gpu, gl = section("Graphics")
         self.gpu_widgets = []
-        for slot, name, _d in self.static["gpus"]:
+        for slot, name, codename, _d in self.static["gpus"]:
             form = InfoForm()
-            form.set("name", name, "GPU")
+            form.set("name", name, "GPU", tooltip=f"{name} ({codename})" if codename else None)
             gl.addLayout(form)
             meters = {}
             if "NVIDIA" in name:
@@ -425,24 +457,54 @@ class DashboardPage(Page):
         # --- Memory
         mem, ml = section("Memory")
         self.ram, self.swap = Meter("RAM", 100, warn=80, crit=92), Meter("Swap", 100)
+        # Installed RAM as sold (16 GB), not what the kernel has left over (15.5 GiB).
+        mods = self.static["ram"][0]
+        self.ram.set_detail(f"{sum(m['size'] for m in mods) / 2**30:.0f} GB" if mods else
+                            sysinfo.gb_label(sysinfo.memory()[1], installed=True))
         ml.addWidget(self.ram)
         ml.addWidget(self.swap)
+        mods, slots, maxcap = self.static["ram"]
+        if mods:
+            f = InfoForm()
+            total = sum(m["size"] for m in mods)
+            gb = lambda n: f"{n / 2**30:.0f} GB"  # noqa: E731
+            kind = " ".join(filter(None, (mods[0]["type"], mods[0]["form"])))
+            speed = f"-{mods[0]['speed']}" if mods[0]["speed"] else ""
+            sizes = {m["size"] for m in mods}
+            sticks = (f"{len(mods)} × {gb(mods[0]['size'])}" if len(sizes) == 1
+                      else " + ".join(gb(m["size"]) for m in mods))
+            f.set("installed", f"{gb(total)} {mods[0]['type']}{speed} ({sticks})", "Installed")
+            channels = {m["slot"].split("-")[0] for m in mods if m["slot"].startswith("Channel")}
+            used = f"{len(mods)} of {slots} used" + (f", up to {gb(maxcap)}" if maxcap else "")
+            if len(channels) >= 2:
+                used += ", dual channel"
+            f.set("slots", used, "Slots")
+            for i, m in enumerate(mods, 1):
+                slot = m["slot"].replace("Channel", "Channel ").split("-")[0] or f"Stick {i}"
+                f.set(f"stick{i}", " ".join(filter(None, (m["brand"], m["part"])))
+                      + "\n" + " · ".join(filter(None, (gb(m["size"]), kind))), slot)
+            ml.addLayout(f)
 
         # --- Storage
         disk, dl = section("Storage")
-        if self.static["nvme"]:
-            f = InfoForm()
-            f.set("drive", ", ".join(self.static["nvme"]), "Drive")
-            dl.addLayout(f)
         self.disk_meters = {}
-        for mnt, fs in self.static["disks"]:
-            self.disk_meters[mnt] = Meter(f"{mnt}  ({fs})", 100, warn=85, crit=95)
+        for mnt, fs, drive in self.static["disks"]:
+            # Top line: "Samsung NVMe SSD, 256 GB"; underneath: part number and mount point.
+            title = " ".join(filter(None, (drive["brand"], drive["kind"])))
+            note = " · ".join(filter(None, (drive["part"], f"{mnt} ({fs})")))
+            self.disk_meters[mnt] = Meter(title, 100, warn=85, crit=95, note=note)
+            if drive["size"]:  # the size it was sold as: 256 GB, 1 TB
+                self.disk_meters[mnt].set_detail(sysinfo.disk_size_label(drive["size"]))
             dl.addWidget(self.disk_meters[mnt])
 
         # --- Battery
         bat, bl = section("Battery")
         self.bat = Meter("Charge", 100)
         bl.addWidget(self.bat)
+        self.bat_health = Meter("Health", 100, warn=80, crit=60, low_is_bad=True,
+                                note="Capacity left compared with when new")
+        self.bat_health.setVisible(False)
+        bl.addWidget(self.bat_health)
         self.bat_form = InfoForm()
         bl.addLayout(self.bat_form)
 
@@ -458,6 +520,10 @@ class DashboardPage(Page):
         boxes = (top, self.temps_box, cpu, gpu, mem, bat, disk, system)
         for i, box in enumerate(boxes):
             box.layout().addStretch()
+            # Equal columns whatever the contents: boxes ignore their own preferred width
+            # (their text wraps) but never shrink below a readable minimum.
+            box.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            box.setMinimumWidth(260)
             cols.addWidget(box, i // 2, i % 2)
         cols.setColumnStretch(0, 1)
         cols.setColumnStretch(1, 1)
@@ -516,8 +582,9 @@ class DashboardPage(Page):
         self.cpu_use.set(u, f"{u} %" if u is not None else "–")
         self.cpu_freq.set(d["cpu_mhz"], f"{d['cpu_mhz'] / 1000:.2f} GHz (peak {d['cpu_peak_mhz'] / 1000:.2f})")
         self.cpu_form2.set("load", " ".join(d["load"]), "Load average")
-        self.cpu_form2.set("gov", f"{d['governor']}" + (f" / {d['epp']}" if d["epp"] else ""),
-                           "Governor")
+        self.cpu_form2.set("gov", d["governor"], "Governor")
+        if d["epp"]:
+            self.cpu_form2.set("epp", d["epp"].replace("_", " "), "Energy preference")
         if d["boost"] is not None:
             self.cpu_form2.set("boost", "on" if d["boost"] else "off", "Turbo Boost")
 
@@ -545,16 +612,21 @@ class DashboardPage(Page):
 
         # memory
         used, total, sused, stotal = d["memory"]
-        self.ram.set(100 * used / total if total else None,
-                     f"{sysinfo.human_bytes(used)} / {sysinfo.human_bytes(total)}")
-        self.swap.set(100 * sused / stotal if stotal else None,
-                      f"{sysinfo.human_bytes(sused)} / {sysinfo.human_bytes(stotal)}" if stotal else "none")
+        for meter, u, t in ((self.ram, used, total), (self.swap, sused, stotal)):
+            if t:
+                meter.set(100 * u / t, f"{100 * u / t:.0f} %")
+                if meter is self.swap:
+                    meter.set_detail(sysinfo.gb_label(t))
+                meter.setToolTip(f"{sysinfo.human_bytes(u)} used of {sysinfo.human_bytes(t)}")
+            else:
+                meter.set(None, "none")
 
         # storage
         for mnt, fs, used, total in d["disks"]:
             if mnt in self.disk_meters and total:
-                self.disk_meters[mnt].set(100 * used / total,
-                                          f"{sysinfo.human_bytes(used)} / {sysinfo.human_bytes(total)}")
+                m = self.disk_meters[mnt]
+                m.set(100 * used / total, f"{100 * used / total:.0f} %")
+                m.setToolTip(f"{sysinfo.human_bytes(used)} used of {sysinfo.human_bytes(total)}")
 
         # battery
         b = d["battery"]
@@ -564,9 +636,14 @@ class DashboardPage(Page):
             power = "AC connected" if d["ac"] else "on battery"
             self.bat_form.set("status", f"{b['status']}, {power}", "Status")
             if b["watts"]:
-                self.bat_form.set("draw", f"{b['watts']:.1f} W", "Power")
+                # The battery's own current: charge rate when charging, the laptop's
+                # draw when discharging. Label it so it isn't read as usage while charging.
+                label = {"Charging": "Charging at", "Discharging": "Using"}.get(b["status"], "Power")
+                self.bat_form.set("draw", f"{b['watts']:.1f} W", label)
+                self.bat_form.labelForField(self.bat_form.rows["draw"]).setText(label)
             if b["health"]:
-                self.bat_form.set("health", f"{b['health']} % of design capacity", "Health")
+                self.bat_health.setVisible(True)
+                self.bat_health.set(b["health"], f"{b['health']} %")
             if b["cycles"]:
                 self.bat_form.set("cycles", b["cycles"], "Cycles")
         else:

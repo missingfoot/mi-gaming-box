@@ -10,6 +10,7 @@ import functools
 import glob
 import os
 import platform
+import re
 import shutil
 import subprocess
 import time
@@ -30,10 +31,10 @@ def _int(path, default=None):
         return default
 
 
-def human_bytes(n):
+def human_bytes(n, digits=2):
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
         if n < 1024 or unit == "TiB":
-            return f"{n:.2f} {unit}" if unit != "B" else f"{n} B"
+            return f"{n:.{digits}f} {unit}" if unit != "B" else f"{n} B"
         n /= 1024
 
 
@@ -66,6 +67,14 @@ def cpu_model():
     return platform.processor() or "unknown"
 
 
+def short_cpu_name(raw):
+    """"Intel(R) Core(TM) i7-8750H CPU @ 2.20GHz" -> "Intel Core i7-8750H"."""
+    name = re.sub(r"\((R|TM|tm|r)\)", "", raw)
+    name = re.sub(r"\s+(CPU\s*)?@.*$", "", name)
+    name = re.sub(r"\s+(CPU|Processor|\d+-Core Processor)$", "", name)
+    return " ".join(name.split())
+
+
 def cpu_counts():
     threads = os.cpu_count() or 0
     cores = set()
@@ -75,7 +84,8 @@ def cpu_counts():
 
 
 def gpus():
-    """[(pci_slot, name, sysfs_dir)] from lspci's names, falling back to vendor ids."""
+    """[(pci_slot, name, codename, sysfs_dir)] from lspci's names, falling back to vendor
+    ids. "NVIDIA GP106M [GeForce GTX 1060 Mobile]" -> ("NVIDIA GeForce GTX 1060 Mobile", "GP106M")."""
     names = {}
     if shutil.which("lspci"):
         try:
@@ -96,18 +106,100 @@ def gpus():
         name = names.get(short, vendor)
         for noise in (" Corporation", " Integrated Graphics Controller"):
             name = name.replace(noise, "")
-        # lspci gives "Vendor Codename [Marketing name]"; lead with the name people know:
-        # "NVIDIA GP106M [GeForce GTX 1060 Mobile]" -> "NVIDIA GeForce GTX 1060 Mobile (GP106M)"
+        codename = ""
         if name.endswith("]") and " [" in name:
             head, market = name[:-1].split(" [", 1)
             vendor_word, _, codename = head.partition(" ")
-            name = f"{vendor_word} {market}" + (f" ({codename})" if codename else "")
-        found.append((slot, name, d))
+            name = f"{vendor_word} {market}"
+        found.append((slot, name, codename, d))
     return found
 
 
+def _whole_disk(dev):
+    """/dev/nvme0n1p2 -> "nvme0n1"; follows device-mapper (LUKS, LVM) down to the disk."""
+    name = os.path.basename(os.path.realpath(dev))
+    for _ in range(4):
+        slaves = glob.glob(f"/sys/class/block/{name}/slaves/*")
+        if not slaves:
+            break
+        name = os.path.basename(slaves[0])
+    path = os.path.realpath(f"/sys/class/block/{name}")
+    if os.path.exists(f"{path}/partition"):
+        name = os.path.basename(os.path.dirname(path))
+    return name
+
+
+def _udev_model(base):
+    """The full model name from udev's database (sysfs cuts SATA models to 16 chars)."""
+    for line in _read(f"/run/udev/data/b{_read(f'{base}/dev')}").splitlines():
+        if line.startswith("E:ID_MODEL_ENC="):
+            enc = line.split("=", 1)[1]
+            return " ".join(re.sub(r"\\x([0-9a-fA-F]{2})",
+                                   lambda m: chr(int(m.group(1), 16)), enc).split())
+    return ""
+
+
+# Model-name prefixes -> brand. Drives report e.g. "SAMSUNG MZVLB256HAHQ-00000",
+# "WDC WD10SPZX-22Z10T1", "ST1000LM035-1RK172" (Seagate), "CT500MX500SSD1" (Crucial).
+DRIVE_BRANDS = [("SAMSUNG", "Samsung"), ("WDC", "Western Digital"), ("WD", "Western Digital"),
+                ("ST", "Seagate"), ("TOSHIBA", "Toshiba"), ("KINGSTON", "Kingston"),
+                ("CT", "Crucial"), ("SANDISK", "SanDisk"), ("INTEL", "Intel"),
+                ("MICRON", "Micron"), ("HFS", "SK hynix"), ("SKHYNIX", "SK hynix"),
+                ("ADATA", "ADATA"), ("HGST", "HGST"), ("HITACHI", "Hitachi"),
+                ("LITEON", "LITE-ON"), ("PNY", "PNY"), ("SABRENT", "Sabrent")]
+
+
+def split_brand(model):
+    """"SAMSUNG MZVLB256HAHQ-00000" -> ("Samsung", "MZVLB256HAHQ-00000")."""
+    first, _, rest = model.partition(" ")
+    for prefix, brand in DRIVE_BRANDS:
+        if first.upper() == prefix and rest:
+            return brand, rest
+    for prefix, brand in DRIVE_BRANDS:
+        if len(prefix) <= 3 and model.upper().startswith(prefix) and model[len(prefix):][:1].isdigit():
+            return brand, model  # "ST1000LM035", "CT500MX500SSD1": the prefix is part of the part number
+    return "", model
+
+
+def drive_info(dev):
+    """{"model", "kind", "size"} for the physical drive behind a /dev node."""
+    disk = _whole_disk(dev)
+    base = f"/sys/block/{disk}"
+    model = _udev_model(base) or " ".join(_read(f"{base}/device/model").split())
+    if disk.startswith("nvme"):
+        kind = "NVMe SSD"
+    elif "/usb" in os.path.realpath(base):
+        kind = "USB drive"
+    elif disk.startswith("mmcblk"):
+        kind = "SD card"
+    else:
+        kind = "HDD" if _read(f"{base}/queue/rotational") == "1" else "SSD"
+        if "/ata" in os.path.realpath(base):
+            kind = f"SATA {kind}"
+    size = (_int(f"{base}/size", 0) or 0) * 512
+    brand, part = split_brand(model)
+    return {"disk": disk, "model": model, "brand": brand, "part": part, "kind": kind, "size": size}
+
+
+def disk_size_label(n):
+    """Drive sizes the way they're sold: 256 GB, 1 TB (decimal)."""
+    if n >= 1e12:
+        return f"{n / 1e12:.1f} TB".replace(".0 ", " ")
+    return f"{n / 1e9:.0f} GB"
+
+
+def gb_label(n, installed=False):
+    """Binary size as people say it: 15.5 GB, 16 GB. installed=True rounds RAM up to the
+    next even GB (the kernel reports a little less than what's fitted)."""
+    gb = n / 2**30
+    if installed:
+        gb = 2 * -(-gb // 2)
+    return f"{gb:.1f} GB".replace(".0 ", " ")
+
+
 def disks():
-    """Mounted real filesystems (one row per device), skipping snapshots/subvolume repeats."""
+    """[(mount, fs, drive_info)]: mounted real filesystems, one row per device,
+    skipping snapshots/subvolume repeats."""
     seen, rows = set(), []
     for line in _read("/proc/mounts").splitlines():
         dev, mnt, fs = line.split()[:3]
@@ -116,12 +208,8 @@ def disks():
         if mnt.startswith(("/boot", "/efi", "/snap", "/var/lib")):
             continue
         seen.add(dev)
-        rows.append((mnt.replace("\\040", " "), fs))
+        rows.append((mnt.replace("\\040", " "), fs, drive_info(dev)))
     return rows
-
-
-def nvme_models():
-    return [m for m in (_read(f"{d}/device/model") for d in sorted(glob.glob("/sys/block/nvme*n1"))) if m]
 
 
 def package_count():
@@ -147,13 +235,14 @@ def static():
             ("Shell", os.path.basename(os.environ.get("SHELL", ""))),
             ("Locale", os.environ.get("LANG", "")),
         ],
-        "cpu_model": cpu_model(),
+        "cpu_model": short_cpu_name(cpu_model()),
+        "cpu_model_full": cpu_model(),
         "cores": cores,
         "threads": threads,
         "cpu_max_mhz": (_int("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq", 0) or 0) // 1000,
         "gpus": gpus(),
         "disks": disks(),
-        "nvme": nvme_models(),
+        "ram": memory_modules(),
     }
 
 
@@ -211,6 +300,39 @@ def temperatures():
                 label = "Package"
             out.append((group, label, v / 1000))
     return out
+
+
+def memory_modules():
+    """Installed RAM sticks, from the firmware tables as udev stores them (no root needed).
+    Returns (modules, slots, max_bytes); modules are dicts with size, type, speed, brand,
+    part, form, slot."""
+    props = {}
+    for line in _read("/run/udev/data/+dmi:id").splitlines():
+        if line.startswith("E:"):
+            k, _, v = line[2:].partition("=")
+            props[k] = v
+    if not props and shutil.which("udevadm"):
+        try:
+            out = subprocess.run(["udevadm", "info", "-q", "property", "-p",
+                                  "/sys/devices/virtual/dmi/id"], capture_output=True,
+                                 text=True, timeout=2).stdout
+            props = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    mods = []
+    i = 0
+    while f"MEMORY_DEVICE_{i}_LOCATOR" in props or f"MEMORY_DEVICE_{i}_SIZE" in props:
+        g = lambda k: props.get(f"MEMORY_DEVICE_{i}_{k}", "").strip()  # noqa: E731
+        size = int(g("SIZE")) if g("SIZE").isdigit() else 0
+        if size and g("PRESENT") != "0":
+            speed = g("CONFIGURED_SPEED_MTS") or g("SPEED_MTS")
+            mods.append({"size": size, "type": g("TYPE"), "speed": int(speed) if speed.isdigit() else 0,
+                         "brand": g("MANUFACTURER"), "part": g("PART_NUMBER"),
+                         "form": g("FORM_FACTOR"), "slot": g("LOCATOR")})
+        i += 1
+    slots = props.get("MEMORY_ARRAY_NUM_DEVICES", "")
+    maxcap = props.get("MEMORY_ARRAY_MAX_CAPACITY", "")
+    return mods, (int(slots) if slots.isdigit() else i), (int(maxcap) if maxcap.isdigit() else 0)
 
 
 def memory():
@@ -282,7 +404,7 @@ def gpu_state(sysfs_dir):
 
 def disk_usage(mounts):
     rows = []
-    for mnt, fs in mounts:
+    for mnt, fs, _drive in mounts:
         try:
             st = os.statvfs(mnt)
         except OSError:
@@ -321,7 +443,7 @@ def live(prev=None, st=None):
     no_turbo = _read(f"{cpu}/intel_pstate/no_turbo")
     st = st or {}
     gpus_live = []
-    for slot, name, d in st.get("gpus", []):
+    for slot, name, _code, d in st.get("gpus", []):
         state = gpu_state(d)
         info = nvidia(d) if "NVIDIA" in name else None
         freq = _int(glob.glob(f"{d}/drm/card*/gt_cur_freq_mhz")[0]) if glob.glob(
